@@ -8,15 +8,26 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = '/data/actual';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-let initialized = false;
+// Track which server we're currently connected to so we can detect credential changes
+let initializedForURL = null;
+let initializedForPassword = null;
 let budgetLoaded = false;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async function ensureInit(serverURL, password) {
-  if (!initialized) {
+  const credentialsChanged =
+    serverURL !== initializedForURL || password !== initializedForPassword;
+
+  if (credentialsChanged) {
+    // Shut down any existing session before re-initialising
+    if (initializedForURL !== null) {
+      try { await api.shutdown(); } catch (_) {}
+    }
     await api.init({ dataDir: DATA_DIR, serverURL, password });
-    initialized = true;
+    initializedForURL = serverURL;
+    initializedForPassword = password;
+    budgetLoaded = false;
   }
 }
 
@@ -33,21 +44,34 @@ function requireBudget(res) {
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
+// List budgets on the server
 app.post('/budgets', async (req, res) => {
   const { serverURL, password } = req.body;
+  if (!serverURL || !password) {
+    return res.status(400).json({ error: 'serverURL and password required' });
+  }
   try {
     await ensureInit(serverURL, password);
-    res.json({ budgets: await api.getBudgets() });
+    const budgets = await api.getBudgets();
+    // getBudgets() returns objects with { id, groupId, name, ... }
+    // downloadBudget() needs groupId, so expose both clearly
+    res.json({ budgets });
   } catch (e) {
-    initialized = false;
+    // Reset so next attempt re-initialises cleanly
+    try { await api.shutdown(); } catch (_) {}
+    initializedForURL = null;
+    initializedForPassword = null;
     res.status(500).json({ error: e.message });
   }
 });
 
+// Load a specific budget — uses groupId (not id) for downloadBudget
 app.post('/budgets/load', async (req, res) => {
   const { serverURL, password, budgetId, encryptionPassword } = req.body;
   try {
     await ensureInit(serverURL, password);
+
+    // budgetId here must be the groupId field from getBudgets()
     if (encryptionPassword) {
       await api.downloadBudget(budgetId, { password: encryptionPassword });
     } else {
@@ -135,22 +159,18 @@ app.get('/rules', async (_, res) => {
   }
 });
 
-// Create payee→category rules. Fetches payees and existing rules once, then
-// processes all mappings in a single pass (no N+1 queries).
+// Create payee→category rules, fetching payees and existing rules once
 app.post('/rules', async (req, res) => {
   if (!requireBudget(res)) return;
-  const { mappings } = req.body; // [{ description, categoryId }]
+  const { mappings } = req.body;
   if (!Array.isArray(mappings)) return res.status(400).json({ error: 'mappings[] required' });
   try {
-    // Fetch payees and existing rules once before the loop
     const [payees, existingRules] = await Promise.all([
       api.getPayees(),
       api.getRules(),
     ]);
 
     const payeeByName = new Map(payees.map(p => [p.name.toLowerCase(), p]));
-
-    // Build a set of existing payeeId→categoryId pairs to avoid duplicates
     const existingPairs = new Set(
       existingRules.flatMap(r => {
         const catAction = r.actions?.find(a => a.field === 'category');
@@ -165,7 +185,6 @@ app.post('/rules', async (req, res) => {
       const payee = payeeByName.get(description.toLowerCase());
       if (!payee || !categoryId) continue;
       if (existingPairs.has(`${payee.id}|${categoryId}`)) continue;
-
       const rule = await api.createRule({
         stage: null,
         conditionsOp: 'and',
@@ -173,7 +192,7 @@ app.post('/rules', async (req, res) => {
         actions: [{ field: 'category', op: 'set', value: categoryId }],
       });
       created.push(rule);
-      existingPairs.add(`${payee.id}|${categoryId}`); // prevent dupes within same batch
+      existingPairs.add(`${payee.id}|${categoryId}`);
     }
 
     await api.sync();
@@ -210,19 +229,16 @@ app.get('/budget-month/:month', async (req, res) => {
 
 app.post('/import', async (req, res) => {
   if (!requireBudget(res)) return;
-  const { accountId, transactions, learnCategories = false, dryRun = false } = req.body;
+  const { accountId, transactions, dryRun = false } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
     return res.status(400).json({ error: 'accountId and transactions[] required' });
   }
   try {
-    // Resolve existing payees once to avoid creating duplicates
     const existingPayees = await api.getPayees();
     const payeeByName = new Map(existingPayees.map(p => [p.name.toLowerCase().trim(), p.id]));
 
     const actualTxns = transactions.map(t => {
-      const descLower = t.description.toLowerCase().trim();
-      const existingPayeeId = payeeByName.get(descLower);
-
+      const existingPayeeId = payeeByName.get(t.description.toLowerCase().trim());
       const txn = {
         date: t.date,
         amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
@@ -231,12 +247,9 @@ app.post('/import', async (req, res) => {
         imported_id: t.imported_id || undefined,
         cleared: true,
         ...(t.category_id ? { category: t.category_id } : {}),
-        ...(existingPayeeId
-          ? { payee: existingPayeeId }
-          : { payee_name: t.description }),
+        ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
       };
 
-      // Map split lines to Actual subtransactions
       if (Array.isArray(t.splits) && t.splits.length > 1) {
         txn.subtransactions = t.splits.map(s => ({
           amount: -toActualAmount(Number(s.amount) || 0),
@@ -248,8 +261,6 @@ app.post('/import', async (req, res) => {
       return txn;
     });
 
-    // importTransactions signature: (accountId, transactions) — no options object
-    // learnCategories is handled via addTransactions flag, not importTransactions
     const result = await api.importTransactions(accountId, actualTxns);
 
     if (!dryRun) {
@@ -269,8 +280,9 @@ app.post('/import', async (req, res) => {
 });
 
 app.post('/reset', async (_, res) => {
-  try { if (initialized) await api.shutdown(); } catch (_) {}
-  initialized = false;
+  try { await api.shutdown(); } catch (_) {}
+  initializedForURL = null;
+  initializedForPassword = null;
   budgetLoaded = false;
   res.json({ ok: true });
 });
