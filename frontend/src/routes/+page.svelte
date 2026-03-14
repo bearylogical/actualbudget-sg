@@ -1,17 +1,57 @@
 <script>
   import '../app.css';
-  import ActualPanel from '../components/ActualPanel.svelte';
+  import ActualSidebar from '../components/ActualSidebar.svelte';
+  import CategoryMapper from '../components/CategoryMapper.svelte';
 
   const API = '/api';
 
-  const CATEGORIES = [
-    'Food & Dining', 'Groceries', 'Transport', 'Shopping', 'Electronics',
-    'Bills & Utilities', 'Software & Cloud', 'Subscriptions', 'Health & Fitness',
-    'Health & Medical', 'Entertainment', 'Travel', 'Payment / Transfer',
-    'Insurance', 'Work / Corporate', 'Donations', 'Education', 'Personal Care',
-    'Uncategorized'
-  ];
+  // ── Actual state (lifted from sidebar) ──────────────────────────────────────
+  let actualConnected = false;
+  let actualBudgetLoaded = false;
+  let actualAccounts = [];
+  let actualCategoryGroups = [];
+  let actualPayees = [];
+  let actualRules = [];
+  let actualAccountId = '';
 
+  function onActualChange(e) {
+    actualConnected = e.detail.connected;
+    actualBudgetLoaded = e.detail.budgetLoaded;
+    actualAccounts = e.detail.accounts;
+    actualCategoryGroups = e.detail.categoryGroups;
+    actualPayees = e.detail.payees;
+    actualRules = e.detail.rules;
+    actualAccountId = e.detail.selectedAccountId;
+  }
+
+  // ── Statement state ──────────────────────────────────────────────────────────
+  let transactions = [];
+  let detectedBank = '';
+  let loading = false;
+  let parseError = '';
+  let dragover = false;
+
+  // ── View ─────────────────────────────────────────────────────────────────────
+  let tab = 'transactions'; // 'transactions' | 'summary'
+
+  // ── Transaction filters ──────────────────────────────────────────────────────
+  let searchQuery = '';
+  let filterCategory = 'All';
+  let sortBy = 'date';
+  let sortDesc = true;
+  let editingId = null;
+  let editingCategory = '';
+  let showCredits = false;
+
+  // ── Import state ──────────────────────────────────────────────────────────────
+  let showMapper = false;       // category mapping modal
+  let categoryMap = {};         // ourLabel → actualCategoryId
+  let importing = false;
+  let importResult = null;
+  let importError = '';
+  let dryRunResult = null;
+
+  // ── Category colours ─────────────────────────────────────────────────────────
   const CAT_COLORS = {
     'Food & Dining': '#f7931e', 'Groceries': '#4caf50', 'Transport': '#2196f3',
     'Shopping': '#e91e63', 'Electronics': '#9c27b0', 'Bills & Utilities': '#ff5722',
@@ -21,26 +61,15 @@
     'Donations': '#009688', 'Education': '#3f51b5', 'Personal Care': '#e91e63',
     'Uncategorized': '#455a64'
   };
+  const CATEGORIES = Object.keys(CAT_COLORS);
 
-  let transactions = [];
-  let loading = false;
-  let error = '';
-  let dragover = false;
-  let searchQuery = '';
-  let filterCategory = 'All';
-  let sortBy = 'date';
-  let sortDesc = true;
-  let editingId = null;
-  let editingCategory = '';
-  let view = 'upload';
-  let detectedBank = '';
-
-  $: filtered = transactions
+  // ── Derived ───────────────────────────────────────────────────────────────────
+  $: displayTxns = showCredits ? transactions : transactions.filter(t => !t.is_credit);
+  $: filtered = displayTxns
     .filter(t => {
-      const matchSearch = !searchQuery ||
-        t.description.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchCat = filterCategory === 'All' || t.category === filterCategory;
-      return matchSearch && matchCat;
+      const ms = !searchQuery || t.description.toLowerCase().includes(searchQuery.toLowerCase());
+      const mc = filterCategory === 'All' || t.category === filterCategory;
+      return ms && mc;
     })
     .sort((a, b) => {
       let va = a[sortBy], vb = b[sortBy];
@@ -51,21 +80,18 @@
 
   $: spending = transactions.filter(t => !t.is_credit);
   $: totalSpend = spending.reduce((s, t) => s + t.amount, 0);
+  $: categorisedCount = transactions.filter(t => t.category !== 'Uncategorized').length;
 
   $: summaryData = (() => {
-    const byCategory = {};
-    for (const t of spending) {
-      if (!byCategory[t.category]) byCategory[t.category] = 0;
-      byCategory[t.category] += t.amount;
-    }
-    return Object.entries(byCategory)
-      .map(([cat, total]) => ({ cat, total }))
-      .sort((a, b) => b.total - a.total);
+    const m = {};
+    for (const t of spending) { m[t.category] = (m[t.category] || 0) + t.amount; }
+    return Object.entries(m).map(([cat, total]) => ({ cat, total })).sort((a, b) => b.total - a.total);
   })();
 
+  // ── File upload ───────────────────────────────────────────────────────────────
   async function uploadFile(file) {
     if (!file) return;
-    loading = true; error = '';
+    loading = true; parseError = ''; importResult = null; dryRunResult = null;
     const fd = new FormData();
     fd.append('file', file);
     try {
@@ -74,12 +100,10 @@
       const data = await res.json();
       transactions = data.transactions.map((t, i) => ({ ...t, id: i }));
       detectedBank = data.bank || '';
-      view = 'transactions';
-    } catch (e) {
-      error = e.message;
-    } finally {
-      loading = false;
-    }
+      // Auto-build category map from Actual data when available
+      if (actualBudgetLoaded) rebuildCategoryMap();
+    } catch (e) { parseError = e.message; }
+    finally { loading = false; }
   }
 
   function onDrop(e) {
@@ -88,158 +112,254 @@
     if (file) uploadFile(file);
   }
 
-  function onFileInput(e) {
-    uploadFile(e.target.files[0]);
-  }
-
-  function startEdit(t) {
-    editingId = t.id;
-    editingCategory = t.category;
-  }
-
+  // ── Category editing ──────────────────────────────────────────────────────────
+  function startEdit(t) { editingId = t.id; editingCategory = t.category; }
   function saveEdit(t) {
-    transactions = transactions.map(tx =>
-      tx.id === t.id ? { ...tx, category: editingCategory } : tx
-    );
+    transactions = transactions.map(tx => tx.id === t.id ? { ...tx, category: editingCategory } : tx);
     editingId = null;
   }
 
+  // ── Category map builder ──────────────────────────────────────────────────────
+  function rebuildCategoryMap() {
+    const allCats = actualCategoryGroups.flatMap(g => g.categories || []);
+    const payeeRuleCat = {};
+    for (const rule of actualRules) {
+      const ca = rule.actions?.find(a => a.field === 'category');
+      const pc = rule.conditions?.find(c => c.field === 'payee');
+      if (ca && pc) payeeRuleCat[pc.value] = ca.value;
+    }
+    const payeeNameId = {};
+    for (const p of actualPayees) payeeNameId[p.name.toLowerCase()] = p.id;
+
+    const ourCats = [...new Set(spending.map(t => t.category))];
+    const map = {};
+    for (const cat of ourCats) {
+      const exact = allCats.find(c => c.name.toLowerCase() === cat.toLowerCase());
+      if (exact) { map[cat] = exact.id; continue; }
+      const words = cat.toLowerCase().split(/[\s&/]+/).filter(w => w.length > 3);
+      let found = null;
+      for (const [pname, pid] of Object.entries(payeeNameId)) {
+        if (words.some(w => pname.includes(w)) && payeeRuleCat[pid]) {
+          found = payeeRuleCat[pid]; break;
+        }
+      }
+      map[cat] = found ?? '';
+    }
+    categoryMap = map;
+  }
+
+  // When Actual loads, rebuild map for any already-loaded transactions
+  $: if (actualBudgetLoaded && spending.length) rebuildCategoryMap();
+
+  // ── Import ────────────────────────────────────────────────────────────────────
+  function importedId(t) {
+    return `stmt-${t.date}-${t.description}-${t.amount}`.replace(/\s+/g, '-');
+  }
+
+  function buildPayload(dr = false) {
+    return {
+      accountId: actualAccountId,
+      dryRun: dr,
+      transactions: spending.map(t => ({
+        ...t,
+        category_id: categoryMap[t.category] || undefined,
+        notes: t.category,
+        imported_id: importedId(t),
+      })),
+    };
+  }
+
+  async function runDryRun() {
+    if (!actualAccountId) { importError = 'Select an account in the sidebar first'; return; }
+    importing = true; importError = ''; dryRunResult = null;
+    try {
+      const res = await fetch(`${API}/actual/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPayload(true))
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      dryRunResult = data;
+    } catch (e) { importError = e.message; }
+    finally { importing = false; }
+  }
+
+  async function doImport() {
+    if (!actualAccountId) { importError = 'Select an account in the sidebar first'; return; }
+    importing = true; importError = ''; importResult = null;
+    try {
+      const res = await fetch(`${API}/actual/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPayload(false))
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      importResult = data;
+    } catch (e) { importError = e.message; }
+    finally { importing = false; }
+  }
+
+  // ── CSV export ────────────────────────────────────────────────────────────────
   async function exportCSV() {
     const res = await fetch(`${API}/export/csv`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ transactions: filtered })
     });
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'budget_export.csv'; a.click();
+    const a = document.createElement('a'); a.href = url; a.download = 'budget_export.csv'; a.click();
     URL.revokeObjectURL(url);
   }
 
-  function fmtAmt(n) {
-    return n.toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
-
-  function fmtDate(d) {
-    return new Date(d).toLocaleDateString('en-SG', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-
-  function confidenceBadge(c) {
-    if (c >= 0.9) return 'high';
-    if (c >= 0.75) return 'med';
-    return 'low';
-  }
+  // ── Formatters ────────────────────────────────────────────────────────────────
+  function fmtAmt(n) { return n.toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function fmtDate(d) { return new Date(d).toLocaleDateString('en-SG', { day: '2-digit', month: 'short', year: 'numeric' }); }
+  function confClass(c) { return c >= 0.9 ? 'high' : c >= 0.75 ? 'med' : 'low'; }
 </script>
 
-<div class="shell">
-  <header>
-    <div class="logo">
-      <span class="logo-icon">💳</span>
-      <span>Budget Parser</span>
-    </div>
-    {#if transactions.length}
-      <nav>
-        <button class:active={view === 'transactions'} class="nav-btn" on:click={() => view = 'transactions'}>
-          Transactions <span class="badge">{transactions.length}</span>
-        </button>
-        <button class:active={view === 'summary'} class="nav-btn" on:click={() => view = 'summary'}>
-          Summary
-        </button>
-        <button class:active={view === 'actual'} class="nav-btn actual-btn" on:click={() => view = 'actual'}>
-          ⬆ Import to Actual
-        </button>
-        <button class="nav-btn" on:click={() => { transactions = []; detectedBank = ''; view = 'upload'; }}>
-          ↩ New File
-        </button>
-      </nav>
-    {/if}
-  </header>
+<!-- Category Mapping Modal -->
+{#if showMapper}
+  <CategoryMapper
+    {spending}
+    {categoryMap}
+    {actualCategoryGroups}
+    on:save={e => { categoryMap = e.detail; showMapper = false; }}
+    on:close={() => showMapper = false}
+  />
+{/if}
 
-  <main>
-    <!-- UPLOAD VIEW -->
-    {#if view === 'upload'}
-      <div class="upload-view">
-        <h1>Bank Statement → Budget</h1>
-        <p class="subtitle">Upload your bank statement. UOB, DBS/POSB, and OCBC are auto-detected. Transactions are categorized using keyword matching.</p>
+<div class="app">
+  <!-- ── SIDEBAR ── -->
+  <ActualSidebar
+    bind:connected={actualConnected}
+    bind:budgetLoaded={actualBudgetLoaded}
+    bind:accounts={actualAccounts}
+    bind:categoryGroups={actualCategoryGroups}
+    bind:payees={actualPayees}
+    bind:rules={actualRules}
+    bind:selectedAccountId={actualAccountId}
+    on:change={onActualChange}
+  />
 
-        <!-- svelte-ignore a11y-no-static-element-interactions -->
-        <div
-          class="dropzone"
-          class:dragover
-          on:dragover|preventDefault={() => dragover = true}
-          on:dragleave={() => dragover = false}
-          on:drop|preventDefault={onDrop}
-          on:click={() => document.getElementById('fileInput').click()}
-        >
-          {#if loading}
-            <div class="spinner"></div>
-            <p>Parsing statement…</p>
-          {:else}
-            <div class="drop-icon">📂</div>
-            <p><strong>Drop your .xls / .xlsx file here</strong></p>
-            <p class="hint">or click to browse</p>
+  <!-- ── MAIN ── -->
+  <div class="main">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="app-title">💳 Budget Parser</span>
+        {#if detectedBank}
+          <span class="badge">{detectedBank}</span>
+        {/if}
+      </div>
+      {#if transactions.length}
+        <div class="topbar-tabs">
+          <button class="tab-btn" class:active={tab === 'transactions'} on:click={() => tab = 'transactions'}>
+            Transactions <span class="badge muted">{transactions.length}</span>
+          </button>
+          <button class="tab-btn" class:active={tab === 'summary'} on:click={() => tab = 'summary'}>
+            Summary
+          </button>
+        </div>
+        <div class="topbar-right">
+          <button class="ghost icon-btn" on:click={exportCSV} title="Export CSV">⬇ CSV</button>
+          <button class="ghost icon-btn" on:click={() => { transactions = []; detectedBank = ''; importResult = null; dryRunResult = null; }}>
+            ✕ Clear
+          </button>
+        </div>
+      {/if}
+    </header>
+
+    <div class="content">
+      <!-- ── EMPTY STATE / DROP ZONE ── -->
+      {#if !transactions.length}
+        <div class="upload-area">
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div class="dropzone" class:dragover
+            on:dragover|preventDefault={() => dragover = true}
+            on:dragleave={() => dragover = false}
+            on:drop|preventDefault={onDrop}
+            on:click={() => document.getElementById('fi').click()}>
+            {#if loading}
+              <span class="spinner lg"></span>
+              <p>Parsing statement…</p>
+            {:else}
+              <div class="drop-icon">📂</div>
+              <p class="drop-title">Drop your bank statement here</p>
+              <p class="drop-sub">or click to browse</p>
+              <div class="banks">
+                <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span>XLS / XLSX</span>
+              </div>
+            {/if}
+          </div>
+          <input id="fi" type="file" accept=".xls,.xlsx" style="display:none"
+            on:change={e => uploadFile(e.target.files[0])} />
+          {#if parseError}
+            <div class="error-msg">{parseError}</div>
           {/if}
         </div>
-        <input id="fileInput" type="file" accept=".xls,.xlsx" style="display:none" on:change={onFileInput} />
 
-        {#if error}
-          <div class="error-box">⚠️ {error}</div>
+      <!-- ── TRANSACTIONS ── -->
+      {:else if tab === 'transactions'}
+        <!-- Import bar -->
+        {#if actualBudgetLoaded}
+          <div class="import-bar">
+            <div class="import-bar-left">
+              {#if importResult}
+                <span class="success-msg">
+                  ✓ Imported: {importResult.added} added, {importResult.updated} updated
+                </span>
+              {:else if dryRunResult}
+                <span class="dryrun-msg">
+                  🔍 Dry run: would add {dryRunResult.added}, update {dryRunResult.updated}
+                </span>
+              {:else if importError}
+                <span class="error-msg">{importError}</span>
+              {:else}
+                <span class="import-hint">
+                  {actualAccountId ? `Ready to import ${spending.length} transactions` : '← Select account in sidebar'}
+                </span>
+              {/if}
+            </div>
+            <div class="import-bar-right">
+              <button class="ghost icon-btn" on:click={() => { rebuildCategoryMap(); showMapper = true; }}>
+                🗂 Categories ({Object.values(categoryMap).filter(Boolean).length}/{[...new Set(spending.map(t=>t.category))].length} mapped)
+              </button>
+              <button class="ghost icon-btn" on:click={runDryRun} disabled={importing || !actualAccountId}>
+                {importing ? '…' : '🔍 Dry Run'}
+              </button>
+              <button class="primary icon-btn" on:click={doImport} disabled={importing || !actualAccountId}>
+                {importing ? '…' : '⬆ Import to Actual'}
+              </button>
+            </div>
+          </div>
         {/if}
 
-        <div class="supported">
-          <span>✓ UOB</span>
-          <span>✓ DBS / POSB</span>
-          <span>✓ OCBC</span>
-          <span>✓ XLS / XLSX</span>
-          <span>✓ Auto-categorization</span>
-          <span>✓ CSV Export</span>
-        </div>
-      </div>
-
-    <!-- TRANSACTIONS VIEW -->
-    {:else if view === 'transactions'}
-      <div class="txn-view">
+        <!-- Filters -->
         <div class="toolbar">
-          <input placeholder="🔍 Search transactions…" bind:value={searchQuery} />
+          <input class="search-input" placeholder="🔍 Search…" bind:value={searchQuery} />
           <select bind:value={filterCategory}>
             <option value="All">All Categories</option>
-            {#each CATEGORIES as c}
-              <option value={c}>{c}</option>
-            {/each}
+            {#each CATEGORIES as c}<option value={c}>{c}</option>{/each}
           </select>
           <select bind:value={sortBy}>
-            <option value="date">Sort: Date</option>
-            <option value="amount">Sort: Amount</option>
-            <option value="category">Sort: Category</option>
+            <option value="date">Date</option>
+            <option value="amount">Amount</option>
+            <option value="category">Category</option>
           </select>
-          <button class="ghost" on:click={() => sortDesc = !sortDesc}>
-            {sortDesc ? '↓' : '↑'}
-          </button>
-          <button class="success" on:click={exportCSV}>⬇ Export CSV</button>
+          <button class="ghost icon-btn" on:click={() => sortDesc = !sortDesc}>{sortDesc ? '↓' : '↑'}</button>
+          <label class="row-label">
+            <input type="checkbox" bind:checked={showCredits} /> Credits
+          </label>
         </div>
 
-        <div class="stats-bar">
-          <div class="stat">
-            <span class="stat-label">Transactions</span>
-            <span class="stat-value">{filtered.length}</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Total Spend</span>
-            <span class="stat-value">SGD {fmtAmt(filtered.filter(t => !t.is_credit).reduce((s,t) => s+t.amount, 0))}</span>
-          </div>
-          {#if detectedBank}
-          <div class="stat">
-            <span class="stat-label">Bank</span>
-            <span class="stat-value">{detectedBank}</span>
-          </div>
-        {/if}
-        <div class="stat">
-            <span class="stat-label">Auto-Categorized</span>
-            <span class="stat-value">{transactions.filter(t => t.category !== 'Uncategorized').length} / {transactions.length}</span>
-          </div>
+        <!-- Stats -->
+        <div class="stats-row">
+          <div class="stat-chip"><span>Showing</span><strong>{filtered.length}</strong></div>
+          <div class="stat-chip"><span>Total Spend</span><strong>SGD {fmtAmt(totalSpend)}</strong></div>
+          <div class="stat-chip"><span>Auto-categorised</span><strong>{categorisedCount}/{transactions.length}</strong></div>
         </div>
 
+        <!-- Table -->
         <div class="table-wrap">
           <table>
             <thead>
@@ -247,29 +367,29 @@
                 <th>Date</th>
                 <th>Description</th>
                 <th>Category</th>
-                <th>Confidence</th>
-                <th style="text-align:right">Amount</th>
+                <th>Conf</th>
+                <th class="r">Amount</th>
               </tr>
             </thead>
             <tbody>
               {#each filtered as t (t.id)}
                 <tr class:credit={t.is_credit}>
-                  <td class="date">{fmtDate(t.date)}</td>
-                  <td class="desc">
+                  <td class="td-date">{fmtDate(t.date)}</td>
+                  <td class="td-desc">
                     <span>{t.description}</span>
                     {#if t.foreign_amount}
                       <span class="foreign">{t.foreign_currency} {t.foreign_amount}</span>
                     {/if}
                   </td>
-                  <td class="cat-cell">
+                  <td>
                     {#if editingId === t.id}
-                      <select bind:value={editingCategory} on:change={() => saveEdit(t)} on:blur={() => saveEdit(t)}>
-                        {#each CATEGORIES as c}
-                          <option value={c}>{c}</option>
-                        {/each}
+                      <select bind:value={editingCategory}
+                        on:change={() => saveEdit(t)} on:blur={() => saveEdit(t)}>
+                        {#each CATEGORIES as c}<option value={c}>{c}</option>{/each}
                       </select>
                     {:else}
-                      <button class="cat-badge" style="background:{CAT_COLORS[t.category]}22; color:{CAT_COLORS[t.category]}; border-color:{CAT_COLORS[t.category]}44"
+                      <button class="cat-badge"
+                        style="background:{CAT_COLORS[t.category]}22;color:{CAT_COLORS[t.category]};border-color:{CAT_COLORS[t.category]}55"
                         on:click={() => startEdit(t)}>
                         {t.category} ✎
                       </button>
@@ -277,159 +397,146 @@
                   </td>
                   <td>
                     {#if !t.is_credit}
-                      <span class="conf conf-{confidenceBadge(t.confidence)}">
-                        {Math.round(t.confidence * 100)}%
-                      </span>
+                      <span class="conf {confClass(t.confidence)}">{Math.round(t.confidence*100)}%</span>
                     {/if}
                   </td>
-                  <td class="amount" class:negative={t.is_credit}>
-                    {t.is_credit ? '−' : ''}{t.currency} {fmtAmt(t.amount)}
+                  <td class="r amt" class:credit-amt={t.is_credit}>
+                    {t.is_credit ? '+' : ''}{t.currency} {fmtAmt(t.amount)}
                   </td>
                 </tr>
               {/each}
             </tbody>
           </table>
         </div>
-      </div>
 
-    <!-- SUMMARY VIEW -->
-    {:else if view === 'summary'}
-      <div class="summary-view">
-        <h2>Spending Summary</h2>
-        <p class="subtitle">Total: <strong>SGD {fmtAmt(totalSpend)}</strong> across {spending.length} transactions</p>
-
-        <div class="summary-grid">
-          {#each summaryData as { cat, total }}
-            <div class="summary-card">
-              <div class="summary-header">
-                <span class="cat-dot" style="background:{CAT_COLORS[cat]}"></span>
-                <span class="cat-name">{cat}</span>
-                <span class="cat-pct">{((total / totalSpend) * 100).toFixed(1)}%</span>
+      <!-- ── SUMMARY ── -->
+      {:else if tab === 'summary'}
+        <div class="summary">
+          <div class="summary-header">
+            <h2>Spending Summary</h2>
+            <p>SGD {fmtAmt(totalSpend)} across {spending.length} transactions</p>
+          </div>
+          <div class="summary-grid">
+            {#each summaryData as { cat, total }}
+              <div class="summary-card">
+                <div class="sc-top">
+                  <span class="sc-dot" style="background:{CAT_COLORS[cat] ?? '#888'}"></span>
+                  <span class="sc-name">{cat}</span>
+                  <span class="sc-pct">{((total/totalSpend)*100).toFixed(1)}%</span>
+                </div>
+                <div class="sc-bar-bg">
+                  <div class="sc-bar" style="width:{(total/totalSpend)*100}%;background:{CAT_COLORS[cat] ?? '#888'}"></div>
+                </div>
+                <div class="sc-amt">SGD {fmtAmt(total)}</div>
               </div>
-              <div class="bar-wrap">
-                <div class="bar" style="width:{(total/totalSpend)*100}%; background:{CAT_COLORS[cat]}"></div>
-              </div>
-              <div class="cat-total">SGD {fmtAmt(total)}</div>
-            </div>
-          {/each}
+            {/each}
+          </div>
         </div>
-      </div>
-
-    <!-- ACTUAL BUDGET VIEW -->
-    {:else if view === 'actual'}
-      <div class="actual-view">
-        <h2>Import to Actual Budget</h2>
-        <p class="subtitle">Connect to your Actual server and push <strong>{transactions.filter(t => !t.is_credit).length}</strong> transactions directly into your budget.</p>
-        <ActualPanel {transactions} />
-      </div>
-    {/if}
-  </main>
+      {/if}
+    </div>
+  </div>
 </div>
 
 <style>
-  .shell { min-height: 100vh; display: flex; flex-direction: column; }
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
-  header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 28px; background: var(--surface);
-    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px; padding: 0 20px;
+    height: 52px; background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
-  .logo { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; }
-  .logo-icon { font-size: 22px; }
+  .topbar-left { display: flex; align-items: center; gap: 10px; flex: 1; }
+  .app-title { font-size: 16px; font-weight: 700; }
+  .topbar-tabs { display: flex; gap: 2px; }
+  .tab-btn {
+    background: transparent; border: none; color: var(--text2);
+    padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500;
+  }
+  .tab-btn:hover, .tab-btn.active { background: var(--surface2); color: var(--text); }
+  .tab-btn.active { color: var(--accent); }
+  .topbar-right { display: flex; gap: 8px; }
 
-  nav { display: flex; gap: 8px; }
-  .nav-btn {
-    background: transparent; color: var(--text2); padding: 6px 14px;
-    border: 1px solid transparent; border-radius: 8px; font-size: 13px;
-  }
-  .nav-btn:hover, .nav-btn.active { background: var(--surface2); border-color: var(--border); color: var(--text); }
-  .badge {
-    background: var(--accent); color: #fff; border-radius: 999px;
-    padding: 1px 7px; font-size: 11px; margin-left: 4px;
-  }
-
-  main { flex: 1; padding: 32px 28px; max-width: 1200px; margin: 0 auto; width: 100%; }
+  /* Content area */
+  .content { flex: 1; overflow-y: auto; padding: 0; }
 
   /* Upload */
-  .upload-view { max-width: 560px; margin: 60px auto; text-align: center; }
-  h1 { font-size: 32px; font-weight: 800; margin-bottom: 12px; }
-  .subtitle { color: var(--text2); margin-bottom: 32px; }
-
+  .upload-area { display: flex; flex-direction: column; gap: 16px; align-items: center; justify-content: center; height: 100%; padding: 40px; }
   .dropzone {
-    border: 2px dashed var(--border); border-radius: 16px; padding: 60px 40px;
-    cursor: pointer; transition: all 0.2s; background: var(--surface);
+    width: 100%; max-width: 480px; border: 2px dashed var(--border); border-radius: 16px;
+    padding: 60px 40px; cursor: pointer; text-align: center; transition: all 0.2s;
     display: flex; flex-direction: column; align-items: center; gap: 12px;
+    background: var(--surface);
   }
   .dropzone.dragover { border-color: var(--accent); background: var(--surface2); }
   .drop-icon { font-size: 48px; }
-  .hint { color: var(--text2); font-size: 13px; }
+  .drop-title { font-size: 18px; font-weight: 600; }
+  .drop-sub { color: var(--text2); font-size: 13px; }
+  .banks { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+  .banks span { background: var(--surface2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--text2); }
 
-  .spinner {
-    width: 40px; height: 40px; border: 3px solid var(--border);
-    border-top-color: var(--accent); border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+  /* Import bar */
+  .import-bar {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .import-bar-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  .import-bar-right { display: flex; gap: 8px; flex-shrink: 0; }
+  .import-hint { font-size: 13px; color: var(--text2); }
+  .dryrun-msg { font-size: 13px; color: var(--accent); background: #6c63ff11; border: 1px solid #6c63ff33; border-radius: 6px; padding: 5px 10px; }
 
-  .error-box { background: #ff6b6b22; border: 1px solid #ff6b6b44; color: #ff6b6b; border-radius: 8px; padding: 12px 16px; margin-top: 16px; }
-  .supported { display: flex; gap: 16px; margin-top: 24px; justify-content: center; flex-wrap: wrap; }
-  .supported span { background: var(--surface2); border: 1px solid var(--border); border-radius: 999px; padding: 4px 14px; font-size: 12px; color: var(--text2); }
+  /* Toolbar */
+  .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid var(--border); }
+  .search-input { flex: 1; min-width: 160px; }
 
-  /* Transactions */
-  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
-  .toolbar input { flex: 1; min-width: 200px; }
+  /* Stats */
+  .stats-row { display: flex; gap: 10px; padding: 10px 20px; flex-wrap: wrap; }
+  .stat-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px; display: flex; flex-direction: column; gap: 1px; }
+  .stat-chip span { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; }
+  .stat-chip strong { font-size: 16px; font-weight: 700; }
 
-  .stats-bar { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 20px; }
-  .stat-label { display: block; color: var(--text2); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
-  .stat-value { font-size: 18px; font-weight: 700; }
-
-  .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); }
+  /* Table */
+  .table-wrap { overflow-x: auto; padding: 0 20px 20px; }
   table { width: 100%; border-collapse: collapse; }
-  thead { background: var(--surface2); }
-  th { padding: 11px 14px; text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text2); font-weight: 600; }
-  td { padding: 11px 14px; border-top: 1px solid var(--border); vertical-align: middle; }
+  thead { position: sticky; top: 0; background: var(--surface2); z-index: 1; }
+  th { padding: 10px 12px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text2); font-weight: 600; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; font-size: 13px; }
   tr:hover td { background: var(--surface2); }
   tr.credit td { opacity: 0.5; }
+  .r { text-align: right; }
 
-  .date { white-space: nowrap; color: var(--text2); font-size: 13px; }
-  .desc { max-width: 280px; }
-  .desc span { display: block; }
+  .td-date { white-space: nowrap; color: var(--text2); }
+  .td-desc { max-width: 260px; }
+  .td-desc span { display: block; }
   .foreign { color: var(--text2); font-size: 12px; }
 
-  .cat-cell { white-space: nowrap; }
   .cat-badge {
     padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500;
-    border: 1px solid; background: transparent; white-space: nowrap;
+    border: 1px solid; background: transparent; white-space: nowrap; cursor: pointer;
   }
   .cat-badge:hover { opacity: 0.8; }
 
-  .conf { font-size: 12px; padding: 2px 8px; border-radius: 999px; }
-  .conf-high { background: #00c9a722; color: var(--accent2); }
-  .conf-med  { background: #f7931e22; color: #f7931e; }
-  .conf-low  { background: #ff6b6b22; color: var(--danger); }
+  .conf { font-size: 11px; padding: 2px 7px; border-radius: 999px; }
+  .conf.high { background: #00c9a722; color: var(--accent2); }
+  .conf.med  { background: #f7931e22; color: var(--warn); }
+  .conf.low  { background: #ff6b6b22; color: var(--danger); }
 
-  .amount { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .amount.negative { color: var(--accent2); }
+  .amt { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .credit-amt { color: var(--accent2); }
 
   /* Summary */
-  .summary-view h2 { font-size: 24px; margin-bottom: 8px; }
-  .summary-grid { display: grid; gap: 14px; margin-top: 24px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-  .summary-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-  .summary-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .cat-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .cat-name { flex: 1; font-weight: 500; }
-  .cat-pct { color: var(--text2); font-size: 13px; }
-  .bar-wrap { height: 6px; background: var(--surface2); border-radius: 999px; overflow: hidden; margin-bottom: 8px; }
-  .bar { height: 100%; border-radius: 999px; transition: width 0.5s; }
-  .cat-total { font-size: 20px; font-weight: 700; }
-
-  /* Actual Budget nav button */
-  .actual-btn { background: #6c63ff22 !important; border-color: var(--accent) !important; color: var(--accent) !important; }
-  .actual-btn.active { background: var(--accent) !important; color: #fff !important; }
-
-  /* Actual view */
-  .actual-view { max-width: 680px; }
-  .actual-view h2 { font-size: 24px; margin-bottom: 6px; }
-
+  .summary { padding: 24px 20px; }
+  .summary-header { margin-bottom: 20px; }
+  .summary-header h2 { font-size: 20px; font-weight: 700; }
+  .summary-header p { color: var(--text2); font-size: 13px; margin-top: 4px; }
+  .summary-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .summary-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+  .sc-top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .sc-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .sc-name { flex: 1; font-weight: 500; font-size: 13px; }
+  .sc-pct { font-size: 12px; color: var(--text2); }
+  .sc-bar-bg { height: 5px; background: var(--surface2); border-radius: 999px; overflow: hidden; margin-bottom: 8px; }
+  .sc-bar { height: 100%; border-radius: 999px; }
+  .sc-amt { font-size: 18px; font-weight: 700; }
 </style>

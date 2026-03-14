@@ -1,6 +1,9 @@
 import express from 'express';
-import * as api from '@actual-app/api';
 import fs from 'fs';
+
+// @actual-app/api is pre-installed in the actualbudget/actual-server base image
+// Import path matches where it lives in that image
+import * as api from '@actual-app/api';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -8,19 +11,36 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = '/data/actual';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// Track which server we're currently connected to so we can detect credential changes
+// ── Global safety net ────────────────────────────────────────────────────────
+// The Actual API sometimes rejects promises with plain objects rather than
+// Error instances. Without this handler Node crashes with ERR_UNHANDLED_REJECTION.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : JSON.stringify(reason);
+  console.error('[unhandledRejection]', msg);
+  // Do NOT exit — let express continue serving requests
+});
+
+// ── State ────────────────────────────────────────────────────────────────────
 let initializedForURL = null;
 let initializedForPassword = null;
 let budgetLoaded = false;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Normalise anything the API throws into a plain string
+function errMsg(e) {
+  if (typeof e === 'string') return e;
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === 'object') {
+    return e.message || e.reason || e.type || JSON.stringify(e);
+  }
+  return String(e);
+}
 
 async function ensureInit(serverURL, password) {
   const credentialsChanged =
     serverURL !== initializedForURL || password !== initializedForPassword;
-
   if (credentialsChanged) {
-    // Shut down any existing session before re-initialising
     if (initializedForURL !== null) {
       try { await api.shutdown(); } catch (_) {}
     }
@@ -36,15 +56,17 @@ function toActualAmount(float) {
 }
 
 function requireBudget(res) {
-  if (!budgetLoaded) { res.status(400).json({ error: 'No budget loaded' }); return false; }
+  if (!budgetLoaded) {
+    res.status(400).json({ error: 'No budget loaded' });
+    return false;
+  }
   return true;
 }
 
-// ── routes ────────────────────────────────────────────────────────────────────
+// ── Routes ───────────────────────────────────────────────────────────────────
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-// List budgets on the server
 app.post('/budgets', async (req, res) => {
   const { serverURL, password } = req.body;
   if (!serverURL || !password) {
@@ -53,25 +75,21 @@ app.post('/budgets', async (req, res) => {
   try {
     await ensureInit(serverURL, password);
     const budgets = await api.getBudgets();
-    // getBudgets() returns objects with { id, groupId, name, ... }
-    // downloadBudget() needs groupId, so expose both clearly
     res.json({ budgets });
   } catch (e) {
-    // Reset so next attempt re-initialises cleanly
     try { await api.shutdown(); } catch (_) {}
     initializedForURL = null;
     initializedForPassword = null;
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
-// Load a specific budget — uses groupId (not id) for downloadBudget
 app.post('/budgets/load', async (req, res) => {
   const { serverURL, password, budgetId, encryptionPassword } = req.body;
   try {
     await ensureInit(serverURL, password);
 
-    // budgetId here must be the groupId field from getBudgets()
+    // budgetId must be budget.groupId from getBudgets() — not budget.id
     if (encryptionPassword) {
       await api.downloadBudget(budgetId, { password: encryptionPassword });
     } else {
@@ -95,7 +113,7 @@ app.post('/budgets/load', async (req, res) => {
 
     res.json({ ok: true, accounts: accountsWithBalance, categoryGroups, payees, rules });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -111,7 +129,7 @@ app.get('/accounts', async (_, res) => {
     );
     res.json({ accounts: accountsWithBalance });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -120,7 +138,7 @@ app.get('/categories', async (_, res) => {
   try {
     res.json({ categoryGroups: await api.getCategoryGroups() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -137,7 +155,7 @@ app.post('/categories', async (req, res) => {
     await api.sync();
     res.json({ id, name, group_id: targetGroupId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -146,7 +164,7 @@ app.get('/payees', async (_, res) => {
   try {
     res.json({ payees: await api.getPayees() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -155,11 +173,10 @@ app.get('/rules', async (_, res) => {
   try {
     res.json({ rules: await api.getRules() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
-// Create payee→category rules, fetching payees and existing rules once
 app.post('/rules', async (req, res) => {
   if (!requireBudget(res)) return;
   const { mappings } = req.body;
@@ -169,7 +186,6 @@ app.post('/rules', async (req, res) => {
       api.getPayees(),
       api.getRules(),
     ]);
-
     const payeeByName = new Map(payees.map(p => [p.name.toLowerCase(), p]));
     const existingPairs = new Set(
       existingRules.flatMap(r => {
@@ -179,7 +195,6 @@ app.post('/rules', async (req, res) => {
         return [];
       })
     );
-
     const created = [];
     for (const { description, categoryId } of mappings) {
       const payee = payeeByName.get(description.toLowerCase());
@@ -194,11 +209,10 @@ app.post('/rules', async (req, res) => {
       created.push(rule);
       existingPairs.add(`${payee.id}|${categoryId}`);
     }
-
     await api.sync();
     res.json({ ok: true, created: created.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -210,7 +224,7 @@ app.post('/preview', async (req, res) => {
     const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
     res.json({ existingIds: [...existingIds], count: existing.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -223,7 +237,7 @@ app.get('/budget-month/:month', async (req, res) => {
     ]);
     res.json({ budget, categoryGroups });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -249,7 +263,6 @@ app.post('/import', async (req, res) => {
         ...(t.category_id ? { category: t.category_id } : {}),
         ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
       };
-
       if (Array.isArray(t.splits) && t.splits.length > 1) {
         txn.subtransactions = t.splits.map(s => ({
           amount: -toActualAmount(Number(s.amount) || 0),
@@ -257,15 +270,11 @@ app.post('/import', async (req, res) => {
           notes: s.notes || '',
         }));
       }
-
       return txn;
     });
 
     const result = await api.importTransactions(accountId, actualTxns);
-
-    if (!dryRun) {
-      await api.sync();
-    }
+    if (!dryRun) await api.sync();
 
     res.json({
       ok: true,
@@ -275,7 +284,7 @@ app.post('/import', async (req, res) => {
       errors: result.errors ?? [],
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
