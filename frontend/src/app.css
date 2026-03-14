@@ -2,13 +2,16 @@
   --bg: #0f1117;
   --surface: #1a1d27;
   --surface2: #22263a;
+  --surface3: #2a2f47;
   --border: #2e3350;
   --accent: #6c63ff;
   --accent2: #00c9a7;
   --danger: #ff6b6b;
+  --warn: #f7931e;
   --text: #e8eaf6;
   --text2: #8b90b8;
-  --radius: 12px;
+  --radius: 10px;
+  --sidebar-w: 280px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,52 +22,49 @@ body {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
+  height: 100vh;
+  overflow: hidden;
 }
 
 button {
-  cursor: pointer;
-  border: none;
-  border-radius: 8px;
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.15s;
+  cursor: pointer; border: none; border-radius: 8px;
+  padding: 8px 16px; font-size: 14px; font-weight: 500; transition: all 0.15s;
 }
-
-button.primary {
-  background: var(--accent);
-  color: #fff;
-}
+button.primary { background: var(--accent); color: #fff; }
 button.primary:hover { background: #5a52e0; }
-
-button.ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text2);
-}
+button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
 button.ghost:hover { border-color: var(--accent); color: var(--text); }
-
-button.success {
-  background: var(--accent2);
-  color: #0f1117;
-}
+button.ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+button.success { background: var(--accent2); color: #0f1117; }
 button.success:hover { opacity: 0.85; }
+button.danger-btn { background: transparent; border: 1px solid #ff6b6b44; color: var(--danger); }
+button.danger-btn:hover { background: #ff6b6b11; }
+button.icon-btn { padding: 6px 10px; font-size: 13px; }
 
 input, select {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.15s;
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 8px; padding: 8px 12px;
+  font-size: 14px; outline: none; transition: border-color 0.15s;
 }
 input:focus, select:focus { border-color: var(--accent); }
+input::placeholder { color: var(--text2); }
 
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
+label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 500; color: var(--text2); }
+label input, label select { color: var(--text); }
+.row-label { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; font-weight: 400; color: var(--text); }
+.row-label input[type=checkbox] { width: auto; accent-color: var(--accent); }
+
+.error-msg { background: #ff6b6b18; border: 1px solid #ff6b6b44; color: var(--danger); border-radius: 8px; padding: 9px 13px; font-size: 13px; }
+.success-msg { background: #00c9a718; border: 1px solid #00c9a744; color: var(--accent2); border-radius: 8px; padding: 9px 13px; font-size: 13px; }
+
+.spinner {
+  width: 20px; height: 20px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.7s linear infinite; display: inline-block;
 }
+.spinner.lg { width: 40px; height: 40px; border-width: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.badge { background: var(--accent); color: #fff; border-radius: 999px; padding: 1px 7px; font-size: 11px; }
+.badge.muted { background: var(--surface3); color: var(--text2); }

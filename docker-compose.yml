@@ -1,3 +1,10 @@
+# ── IMPORTANT: API version matching ─────────────────────────────────────────
+# @actual-app/api must match your Actual server version.
+# If you see "out-of-sync-migrations", edit actual-bridge/package.json and
+# pin "@actual-app/api" to match your server's release (e.g. "25.10.0").
+# Find your server version at: http://your-server:5006/api/info
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
   actual-bridge:
     build: ./actual-bridge
@@ -41,11 +48,9 @@ services:
       ACTUAL_BRIDGE_URL: "http://actual-bridge:3001"
       WATCH_DIR: "/watch"
       POLL_INTERVAL_SECONDS: "30"
-      LEARN_CATEGORIES: "true"
-      # Set these to enable fully automated imports:
       # ACTUAL_SERVER_URL: "http://your-actual-server:5006"
       # ACTUAL_PASSWORD: "your-password"
-      # ACTUAL_BUDGET_ID: "your-budget-sync-id"
+      # ACTUAL_BUDGET_ID: "your-budget-groupId"
       # ACTUAL_ACCOUNT_ID: "your-account-uuid"
     depends_on:
       - actual-bridge

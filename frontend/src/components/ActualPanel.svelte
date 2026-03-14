@@ -455,11 +455,14 @@
       <h3>Select Budget File</h3>
       <div class="item-list">
         {#each budgets as b}
-          <button class="list-item" class:selected={selectedBudgetId === b.id}
-            on:click={() => selectedBudgetId = b.id}>
+          <button class="list-item" class:selected={selectedBudgetId === b.groupId}
+            on:click={() => selectedBudgetId = b.groupId}>
             <span class="item-icon">📒</span>
-            <span class="item-name">{b.name}</span>
-            {#if selectedBudgetId === b.id}<span class="check">✓</span>{/if}
+            <div class="item-body">
+              <span class="item-name">{b.name}</span>
+              <span class="item-sub">{b.state === 'remote' ? '☁ Remote' : '💾 Local'}</span>
+            </div>
+            {#if selectedBudgetId === b.groupId}<span class="check">✓</span>{/if}
           </button>
         {/each}
         {#if !budgets.length}<p class="hint">No budget files found.</p>{/if}

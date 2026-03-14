@@ -1,6 +1,9 @@
 import express from 'express';
-import * as api from '@actual-app/api';
 import fs from 'fs';
+
+// @actual-app/api is pre-installed in the actualbudget/actual-server base image
+// Import path matches where it lives in that image
+import * as api from '@actual-app/api';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -8,15 +11,43 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = '/data/actual';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-let initialized = false;
+// ── Global safety net ────────────────────────────────────────────────────────
+// The Actual API sometimes rejects promises with plain objects rather than
+// Error instances. Without this handler Node crashes with ERR_UNHANDLED_REJECTION.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : JSON.stringify(reason);
+  console.error('[unhandledRejection]', msg);
+  // Do NOT exit — let express continue serving requests
+});
+
+// ── State ────────────────────────────────────────────────────────────────────
+let initializedForURL = null;
+let initializedForPassword = null;
 let budgetLoaded = false;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Normalise anything the API throws into a plain string
+function errMsg(e) {
+  if (typeof e === 'string') return e;
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === 'object') {
+    return e.message || e.reason || e.type || JSON.stringify(e);
+  }
+  return String(e);
+}
 
 async function ensureInit(serverURL, password) {
-  if (!initialized) {
+  const credentialsChanged =
+    serverURL !== initializedForURL || password !== initializedForPassword;
+  if (credentialsChanged) {
+    if (initializedForURL !== null) {
+      try { await api.shutdown(); } catch (_) {}
+    }
     await api.init({ dataDir: DATA_DIR, serverURL, password });
-    initialized = true;
+    initializedForURL = serverURL;
+    initializedForPassword = password;
+    budgetLoaded = false;
   }
 }
 
@@ -25,22 +56,31 @@ function toActualAmount(float) {
 }
 
 function requireBudget(res) {
-  if (!budgetLoaded) { res.status(400).json({ error: 'No budget loaded' }); return false; }
+  if (!budgetLoaded) {
+    res.status(400).json({ error: 'No budget loaded' });
+    return false;
+  }
   return true;
 }
 
-// ── routes ────────────────────────────────────────────────────────────────────
+// ── Routes ───────────────────────────────────────────────────────────────────
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
 app.post('/budgets', async (req, res) => {
   const { serverURL, password } = req.body;
+  if (!serverURL || !password) {
+    return res.status(400).json({ error: 'serverURL and password required' });
+  }
   try {
     await ensureInit(serverURL, password);
-    res.json({ budgets: await api.getBudgets() });
+    const budgets = await api.getBudgets();
+    res.json({ budgets });
   } catch (e) {
-    initialized = false;
-    res.status(500).json({ error: e.message });
+    try { await api.shutdown(); } catch (_) {}
+    initializedForURL = null;
+    initializedForPassword = null;
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -48,6 +88,8 @@ app.post('/budgets/load', async (req, res) => {
   const { serverURL, password, budgetId, encryptionPassword } = req.body;
   try {
     await ensureInit(serverURL, password);
+
+    // budgetId must be budget.groupId from getBudgets() — not budget.id
     if (encryptionPassword) {
       await api.downloadBudget(budgetId, { password: encryptionPassword });
     } else {
@@ -71,7 +113,7 @@ app.post('/budgets/load', async (req, res) => {
 
     res.json({ ok: true, accounts: accountsWithBalance, categoryGroups, payees, rules });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -87,7 +129,7 @@ app.get('/accounts', async (_, res) => {
     );
     res.json({ accounts: accountsWithBalance });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -96,7 +138,7 @@ app.get('/categories', async (_, res) => {
   try {
     res.json({ categoryGroups: await api.getCategoryGroups() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -113,7 +155,7 @@ app.post('/categories', async (req, res) => {
     await api.sync();
     res.json({ id, name, group_id: targetGroupId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -122,7 +164,7 @@ app.get('/payees', async (_, res) => {
   try {
     res.json({ payees: await api.getPayees() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -131,26 +173,20 @@ app.get('/rules', async (_, res) => {
   try {
     res.json({ rules: await api.getRules() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
-// Create payee→category rules. Fetches payees and existing rules once, then
-// processes all mappings in a single pass (no N+1 queries).
 app.post('/rules', async (req, res) => {
   if (!requireBudget(res)) return;
-  const { mappings } = req.body; // [{ description, categoryId }]
+  const { mappings } = req.body;
   if (!Array.isArray(mappings)) return res.status(400).json({ error: 'mappings[] required' });
   try {
-    // Fetch payees and existing rules once before the loop
     const [payees, existingRules] = await Promise.all([
       api.getPayees(),
       api.getRules(),
     ]);
-
     const payeeByName = new Map(payees.map(p => [p.name.toLowerCase(), p]));
-
-    // Build a set of existing payeeId→categoryId pairs to avoid duplicates
     const existingPairs = new Set(
       existingRules.flatMap(r => {
         const catAction = r.actions?.find(a => a.field === 'category');
@@ -159,13 +195,11 @@ app.post('/rules', async (req, res) => {
         return [];
       })
     );
-
     const created = [];
     for (const { description, categoryId } of mappings) {
       const payee = payeeByName.get(description.toLowerCase());
       if (!payee || !categoryId) continue;
       if (existingPairs.has(`${payee.id}|${categoryId}`)) continue;
-
       const rule = await api.createRule({
         stage: null,
         conditionsOp: 'and',
@@ -173,13 +207,12 @@ app.post('/rules', async (req, res) => {
         actions: [{ field: 'category', op: 'set', value: categoryId }],
       });
       created.push(rule);
-      existingPairs.add(`${payee.id}|${categoryId}`); // prevent dupes within same batch
+      existingPairs.add(`${payee.id}|${categoryId}`);
     }
-
     await api.sync();
     res.json({ ok: true, created: created.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -191,7 +224,7 @@ app.post('/preview', async (req, res) => {
     const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
     res.json({ existingIds: [...existingIds], count: existing.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
@@ -204,25 +237,22 @@ app.get('/budget-month/:month', async (req, res) => {
     ]);
     res.json({ budget, categoryGroups });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
 app.post('/import', async (req, res) => {
   if (!requireBudget(res)) return;
-  const { accountId, transactions, learnCategories = false, dryRun = false } = req.body;
+  const { accountId, transactions, dryRun = false } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
     return res.status(400).json({ error: 'accountId and transactions[] required' });
   }
   try {
-    // Resolve existing payees once to avoid creating duplicates
     const existingPayees = await api.getPayees();
     const payeeByName = new Map(existingPayees.map(p => [p.name.toLowerCase().trim(), p.id]));
 
     const actualTxns = transactions.map(t => {
-      const descLower = t.description.toLowerCase().trim();
-      const existingPayeeId = payeeByName.get(descLower);
-
+      const existingPayeeId = payeeByName.get(t.description.toLowerCase().trim());
       const txn = {
         date: t.date,
         amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
@@ -231,12 +261,8 @@ app.post('/import', async (req, res) => {
         imported_id: t.imported_id || undefined,
         cleared: true,
         ...(t.category_id ? { category: t.category_id } : {}),
-        ...(existingPayeeId
-          ? { payee: existingPayeeId }
-          : { payee_name: t.description }),
+        ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
       };
-
-      // Map split lines to Actual subtransactions
       if (Array.isArray(t.splits) && t.splits.length > 1) {
         txn.subtransactions = t.splits.map(s => ({
           amount: -toActualAmount(Number(s.amount) || 0),
@@ -244,17 +270,11 @@ app.post('/import', async (req, res) => {
           notes: s.notes || '',
         }));
       }
-
       return txn;
     });
 
-    // importTransactions signature: (accountId, transactions) — no options object
-    // learnCategories is handled via addTransactions flag, not importTransactions
     const result = await api.importTransactions(accountId, actualTxns);
-
-    if (!dryRun) {
-      await api.sync();
-    }
+    if (!dryRun) await api.sync();
 
     res.json({
       ok: true,
@@ -264,13 +284,14 @@ app.post('/import', async (req, res) => {
       errors: result.errors ?? [],
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: errMsg(e) });
   }
 });
 
 app.post('/reset', async (_, res) => {
-  try { if (initialized) await api.shutdown(); } catch (_) {}
-  initialized = false;
+  try { await api.shutdown(); } catch (_) {}
+  initializedForURL = null;
+  initializedForPassword = null;
   budgetLoaded = false;
   res.json({ ok: true });
 });
