@@ -1,0 +1,56 @@
+services:
+  actual-bridge:
+    build: ./actual-bridge
+    container_name: budget-actual-bridge
+    restart: unless-stopped
+    volumes:
+      - actual-data:/data/actual
+    environment:
+      PORT: "3001"
+
+  backend:
+    build: ./backend
+    container_name: budget-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ACTUAL_BRIDGE_URL: "http://actual-bridge:3001"
+    depends_on:
+      - actual-bridge
+
+  frontend:
+    build: ./frontend
+    container_name: budget-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    container_name: budget-scheduler
+    restart: unless-stopped
+    volumes:
+      - watch-dir:/watch
+      - scheduler-data:/data
+    environment:
+      ACTUAL_BRIDGE_URL: "http://actual-bridge:3001"
+      WATCH_DIR: "/watch"
+      POLL_INTERVAL_SECONDS: "30"
+      LEARN_CATEGORIES: "true"
+      # Set these to enable fully automated imports:
+      # ACTUAL_SERVER_URL: "http://your-actual-server:5006"
+      # ACTUAL_PASSWORD: "your-password"
+      # ACTUAL_BUDGET_ID: "your-budget-sync-id"
+      # ACTUAL_ACCOUNT_ID: "your-account-uuid"
+    depends_on:
+      - actual-bridge
+
+volumes:
+  actual-data:
+  watch-dir:
+  scheduler-data:

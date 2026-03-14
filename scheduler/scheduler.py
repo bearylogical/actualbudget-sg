@@ -1,0 +1,167 @@
+"""
+Scheduled statement importer.
+Watches WATCH_DIR for new .xls/.xlsx files and imports them into Actual Budget.
+"""
+import os
+import time
+import json
+import shutil
+import logging
+import subprocess
+import tempfile
+import requests
+import pandas as pd
+from pathlib import Path
+from parsers import detect_and_parse
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("scheduler")
+
+WATCH_DIR   = Path(os.getenv("WATCH_DIR", "/watch"))
+DONE_DIR    = Path(os.getenv("DONE_DIR", "/watch/done"))
+ERROR_DIR   = Path(os.getenv("ERROR_DIR", "/watch/error"))
+POLL_SECS   = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
+BRIDGE_URL  = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
+CONFIG_FILE = Path(os.getenv("CONFIG_FILE", "/data/scheduler-config.json"))
+
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def get_cfg(key: str, default: str = "") -> str:
+    return load_config().get(key, os.getenv(key, default))
+
+
+def ensure_dirs():
+    for d in [WATCH_DIR, DONE_DIR, ERROR_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def parse_file(path: Path) -> tuple[list[dict], str]:
+    if path.suffix.lower() == ".xls":
+        with open(path, "rb") as f:
+            content = f.read()
+        with tempfile.NamedTemporaryFile(suffix=".xls", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            out_dir = tempfile.mkdtemp()
+            subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "xlsx",
+                 tmp_path, "--outdir", out_dir],
+                capture_output=True, check=True
+            )
+            xlsx_path = os.path.join(out_dir, os.path.basename(tmp_path).replace(".xls", ".xlsx"))
+            df = pd.read_excel(xlsx_path, header=None)
+        finally:
+            os.unlink(tmp_path)
+    else:
+        df = pd.read_excel(path, header=None)
+
+    return detect_and_parse(df, hint=path.name)
+
+
+def ensure_budget_loaded() -> bool:
+    try:
+        if not requests.get(f"{BRIDGE_URL}/health", timeout=5).ok:
+            return False
+    except Exception:
+        return False
+
+    server_url = get_cfg("ACTUAL_SERVER_URL")
+    password   = get_cfg("ACTUAL_PASSWORD")
+    budget_id  = get_cfg("ACTUAL_BUDGET_ID")
+    enc_pass   = get_cfg("ACTUAL_ENCRYPTION_PASSWORD")
+
+    if not all([server_url, password, budget_id]):
+        log.warning("Missing Actual connection config — skipping import")
+        return False
+
+    body = {"serverURL": server_url, "password": password, "budgetId": budget_id}
+    if enc_pass:
+        body["encryptionPassword"] = enc_pass
+
+    try:
+        return requests.post(f"{BRIDGE_URL}/budgets/load", json=body, timeout=60).ok
+    except Exception as e:
+        log.error(f"Failed to load budget: {e}")
+        return False
+
+
+def import_transactions(transactions: list[dict]) -> dict:
+    account_id = get_cfg("ACTUAL_ACCOUNT_ID")
+    if not account_id:
+        raise ValueError("ACTUAL_ACCOUNT_ID not configured")
+
+    enriched = [
+        {
+            **t,
+            "imported_id": f"auto-{t['date']}-{t['description']}-{t['amount']}".replace(" ", "-"),
+            "notes": t.get("category", ""),
+        }
+        for t in transactions if not t.get("is_credit")
+    ]
+
+    learn = get_cfg("LEARN_CATEGORIES", "true").lower() == "true"
+    r = requests.post(
+        f"{BRIDGE_URL}/import",
+        json={"accountId": account_id, "transactions": enriched, "learnCategories": learn},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def already_processed(path: Path) -> bool:
+    """Check if a same-named file already exists in done/ or error/."""
+    return (DONE_DIR / path.name).exists() or (ERROR_DIR / path.name).exists()
+
+
+def process_file(path: Path):
+    log.info(f"Processing: {path.name}")
+    try:
+        transactions, bank = parse_file(path)
+        log.info(f"  Parsed {len(transactions)} transactions (bank: {bank})")
+
+        if not ensure_budget_loaded():
+            raise RuntimeError("Could not load Actual budget — check connection config")
+
+        result = import_transactions(transactions)
+        log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated")
+
+        # Timestamp the filename to allow re-importing the same statement name later
+        dest = DONE_DIR / f"{path.stem}_{int(time.time())}{path.suffix}"
+        shutil.move(str(path), str(dest))
+        log.info(f"  Moved to done: {dest.name}")
+
+    except Exception as e:
+        log.error(f"  Error: {e}")
+        dest = ERROR_DIR / path.name
+        try:
+            shutil.move(str(path), str(dest))
+        except Exception:
+            pass
+
+
+def main():
+    ensure_dirs()
+    log.info(f"Scheduler watching {WATCH_DIR} every {POLL_SECS}s")
+
+    while True:
+        for path in sorted(WATCH_DIR.glob("*.xl*")):
+            if path.is_file() and not already_processed(path):
+                time.sleep(2)  # wait for file write to complete
+                if path.exists():
+                    process_file(path)
+
+        time.sleep(POLL_SECS)
+
+
+if __name__ == "__main__":
+    main()
