@@ -7,6 +7,7 @@ COPY package.json .
 # e.g. change "latest" to "25.10.0" in package.json
 RUN npm install
 
+COPY polyfill.js .
 COPY index.js .
 RUN mkdir -p /data/actual
 
