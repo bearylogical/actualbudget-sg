@@ -41,7 +41,7 @@
   let sortDesc = true;
   let editingId = null;
   let editingCategory = '';
-  let showCredits = false;
+  let showCredits = true;
 
   // ── Import state ──────────────────────────────────────────────────────────────
   let showMapper = false;       // category mapping modal
