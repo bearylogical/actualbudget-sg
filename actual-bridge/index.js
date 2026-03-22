@@ -241,46 +241,89 @@ app.get('/budget-month/:month', async (req, res) => {
   }
 });
 
+function buildActualTxn(t, payeeByName) {
+  const existingPayeeId = payeeByName.get(t.description.toLowerCase().trim());
+  const txn = {
+    date: t.date,
+    amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
+    imported_payee: t.description,
+    notes: t.notes || '',
+    imported_id: t.imported_id || undefined,
+    cleared: true,
+    ...(t.category_id ? { category: t.category_id } : {}),
+    ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
+  };
+  if (Array.isArray(t.splits) && t.splits.length > 1) {
+    txn.subtransactions = t.splits.map(s => ({
+      amount: -toActualAmount(Number(s.amount) || 0),
+      ...(s.category_id ? { category: s.category_id } : {}),
+      notes: s.notes || '',
+    }));
+  }
+  return txn;
+}
+
 app.post('/import', async (req, res) => {
   if (!requireBudget(res)) return;
-  const { accountId, transactions, dryRun = false } = req.body;
+  const { accountId, transactions, dryRun = false, verified = {} } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
     return res.status(400).json({ error: 'accountId and transactions[] required' });
   }
   try {
+    // Fetch existing transactions for the incoming date range to check for duplicates
+    const dates = transactions.map(t => t.date).sort();
+    const existing = await api.getTransactions(accountId, dates[0], dates[dates.length - 1]);
+    const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
+
+    // Classify into three buckets
+    const clearlyNew = [];
+    const clearlyDup = [];
+    const needsVerify = [];
+
+    for (const t of transactions) {
+      const hasRef = t.imported_id && t.imported_id.startsWith('ref-');
+      const idMatch = existingIds.has(t.imported_id) || existingIds.has(t.legacy_id);
+
+      if (!idMatch) {
+        clearlyNew.push(t);
+      } else if (hasRef) {
+        clearlyDup.push(t);   // bank-assigned ref confirms it's a duplicate
+      } else {
+        needsVerify.push(t);  // hash collision — may be a legitimate second transaction
+      }
+    }
+
+    if (dryRun) {
+      // Pure read-only preview — do not touch the budget
+      return res.json({
+        ok: true,
+        dryRun: true,
+        added: clearlyNew.length,
+        skipped: clearlyDup.length,
+        toVerify: needsVerify,
+        updated: 0,
+        errors: [],
+      });
+    }
+
+    // For actual import: resolve needsVerify using user decisions from frontend
+    const verifiedToImport = needsVerify.filter(t => verified[t.imported_id] === 'import');
+    const toImport = [...clearlyNew, ...verifiedToImport];
+
     const existingPayees = await api.getPayees();
     const payeeByName = new Map(existingPayees.map(p => [p.name.toLowerCase().trim(), p.id]));
-
-    const actualTxns = transactions.map(t => {
-      const existingPayeeId = payeeByName.get(t.description.toLowerCase().trim());
-      const txn = {
-        date: t.date,
-        amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
-        imported_payee: t.description,
-        notes: t.notes || '',
-        imported_id: t.imported_id || undefined,
-        cleared: true,
-        ...(t.category_id ? { category: t.category_id } : {}),
-        ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
-      };
-      if (Array.isArray(t.splits) && t.splits.length > 1) {
-        txn.subtransactions = t.splits.map(s => ({
-          amount: -toActualAmount(Number(s.amount) || 0),
-          ...(s.category_id ? { category: s.category_id } : {}),
-          notes: s.notes || '',
-        }));
-      }
-      return txn;
-    });
+    const actualTxns = toImport.map(t => buildActualTxn(t, payeeByName));
 
     const result = await api.importTransactions(accountId, actualTxns);
-    if (!dryRun) await api.sync();
+    await api.sync();
 
+    const skipped = clearlyDup.length + needsVerify.filter(t => verified[t.imported_id] !== 'import').length;
     res.json({
       ok: true,
-      dryRun,
+      dryRun: false,
       added: result.added?.length ?? 0,
       updated: result.updated?.length ?? 0,
+      skipped,
       errors: result.errors ?? [],
     });
   } catch (e) {
