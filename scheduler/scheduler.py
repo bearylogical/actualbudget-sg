@@ -107,7 +107,7 @@ def import_transactions(transactions: list[dict]) -> dict:
             "legacy_id": f"auto-{t['date']}-{t['description']}-{t['amount']}".replace(" ", "-"),
             "notes": t.get("category", ""),
         }
-        for t in transactions if not t.get("is_credit")
+        for t in transactions
     ]
 
     learn = get_cfg("LEARN_CATEGORIES", "true").lower() == "true"
