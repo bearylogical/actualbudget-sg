@@ -11,4 +11,4 @@ COPY index.js .
 RUN mkdir -p /data/actual
 
 EXPOSE 3001
-CMD ["node", "index.js"]
+CMD ["node", "--import", "./polyfill.js", "index.js"]
