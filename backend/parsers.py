@@ -3,6 +3,7 @@ Multi-bank statement parsers for UOB, DBS/POSB, and OCBC.
 Each parser returns a list of standardised transaction dicts.
 """
 import re
+import hashlib
 from typing import Optional
 import pandas as pd
 from categorizer import categorize_transaction   # top-level import
@@ -12,9 +13,19 @@ def _clean_desc(raw) -> str:
     return re.sub(r'\s+', ' ', str(raw).split("\n")[0].strip())
 
 
+def _clean_ref(raw) -> Optional[str]:
+    """Return a non-empty, non-nan ref string or None."""
+    val = str(raw).strip()
+    return val if val and val not in ("nan", "NaT", "None", "") else None
+
+
 def _std(date: str, desc: str, amount: float, currency: str = "SGD",
-         foreign_amount=None, foreign_currency=None) -> dict:
+         foreign_amount=None, foreign_currency=None, ref=None) -> dict:
     category, confidence = categorize_transaction(desc)
+    if ref:
+        imported_id = f"ref-{ref}"
+    else:
+        imported_id = hashlib.sha256(f"{date}|{desc}|{abs(amount)}".encode()).hexdigest()[:16]
     return {
         "date": date,
         "description": desc,
@@ -25,6 +36,8 @@ def _std(date: str, desc: str, amount: float, currency: str = "SGD",
         "confidence": confidence,
         "foreign_amount": float(foreign_amount) if foreign_amount is not None and pd.notna(foreign_amount) else None,
         "foreign_currency": foreign_currency if foreign_currency and str(foreign_currency) not in ("nan", "") else None,
+        "ref": ref,
+        "imported_id": imported_id,
     }
 
 
@@ -41,6 +54,8 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
     df = df.copy()
     df.columns = df.iloc[header_row]
     data = df.iloc[header_row + 1:].reset_index(drop=True)
+
+    ref_col = next((c for c in data.columns if "ref" in str(c).lower()), None)
 
     txns = []
     for _, row in data.iterrows():
@@ -62,7 +77,8 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
         except Exception:
             continue
 
-        txns.append(_std(date_str, _clean_desc(description), amount, currency, foreign_amount, foreign_currency))
+        ref = _clean_ref(row.get(ref_col)) if ref_col else None
+        txns.append(_std(date_str, _clean_desc(description), amount, currency, foreign_amount, foreign_currency, ref=ref))
     return txns
 
 
@@ -93,6 +109,8 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
             col_map["credit"] = col
         elif any(k in cl for k in ("description", "reference", "particulars", "narration")):
             col_map.setdefault("desc", col)
+        if "ref" in cl and col_map.get("desc") != col:
+            col_map.setdefault("ref", col)
 
     if "date" not in col_map or "desc" not in col_map:
         raise ValueError("DBS: required columns not found")
@@ -114,7 +132,8 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
             date_str = _parse_date(raw_date)
         except Exception:
             continue
-        txns.append(_std(date_str, desc, amount))
+        ref = _clean_ref(row.get(col_map["ref"])) if "ref" in col_map else None
+        txns.append(_std(date_str, desc, amount, ref=ref))
     return txns
 
 
@@ -145,6 +164,8 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
             col_map["credit"] = col
         elif any(k in cl for k in ("description", "transaction", "detail", "remarks")):
             col_map.setdefault("desc", col)
+        if "ref" in cl and col_map.get("desc") != col:
+            col_map.setdefault("ref", col)
 
     if "date" not in col_map or "desc" not in col_map:
         raise ValueError("OCBC: required columns not found")
@@ -166,7 +187,8 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
             date_str = _parse_date(raw_date)
         except Exception:
             continue
-        txns.append(_std(date_str, desc, amount))
+        ref = _clean_ref(row.get(col_map["ref"])) if "ref" in col_map else None
+        txns.append(_std(date_str, desc, amount, ref=ref))
     return txns
 
 

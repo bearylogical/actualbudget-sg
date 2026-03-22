@@ -50,6 +50,7 @@
   let importResult = null;
   let importError = '';
   let dryRunResult = null;
+  let verifications = {};       // { [imported_id]: 'skip' | 'import' } for ambiguous dupes
 
   // ── Category colours ─────────────────────────────────────────────────────────
   const CAT_COLORS = {
@@ -152,7 +153,8 @@
   $: if (actualBudgetLoaded && spending.length) rebuildCategoryMap();
 
   // ── Import ────────────────────────────────────────────────────────────────────
-  function importedId(t) {
+  // Backend now generates imported_id (ref-based or hash); legacy_id covers old stmt-... format
+  function legacyId(t) {
     return `stmt-${t.date}-${t.description}-${t.amount}`.replace(/\s+/g, '-');
   }
 
@@ -160,18 +162,22 @@
     return {
       accountId: actualAccountId,
       dryRun: dr,
+      verified: verifications,
       transactions: spending.map(t => ({
         ...t,
         category_id: categoryMap[t.category] || undefined,
         notes: t.category,
-        imported_id: importedId(t),
+        legacy_id: legacyId(t),
       })),
     };
   }
 
+  $: unresolvedVerify = (dryRunResult?.toVerify ?? []).filter(t => !verifications[t.imported_id]);
+  $: hasUnresolved = unresolvedVerify.length > 0;
+
   async function runDryRun() {
     if (!actualAccountId) { importError = 'Select an account in the sidebar first'; return; }
-    importing = true; importError = ''; dryRunResult = null;
+    importing = true; importError = ''; dryRunResult = null; verifications = {};
     try {
       const res = await fetch(`${API}/actual/import`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -306,11 +312,11 @@
             <div class="import-bar-left">
               {#if importResult}
                 <span class="success-msg">
-                  ✓ Imported: {importResult.added} added, {importResult.updated} updated
+                  ✓ Imported: {importResult.added} added, {importResult.updated} updated{importResult.skipped ? `, ${importResult.skipped} skipped` : ''}
                 </span>
               {:else if dryRunResult}
                 <span class="dryrun-msg">
-                  🔍 Dry run: would add {dryRunResult.added}, update {dryRunResult.updated}
+                  🔍 Dry run: {dryRunResult.added} new, {dryRunResult.skipped} already imported{dryRunResult.toVerify?.length ? `, ${dryRunResult.toVerify.length} need review` : ''}
                 </span>
               {:else if importError}
                 <span class="error-msg">{importError}</span>
@@ -327,10 +333,36 @@
               <button class="ghost icon-btn" on:click={runDryRun} disabled={importing || !actualAccountId}>
                 {importing ? '…' : '🔍 Dry Run'}
               </button>
-              <button class="primary icon-btn" on:click={doImport} disabled={importing || !actualAccountId}>
-                {importing ? '…' : '⬆ Import to Actual'}
+              <button class="primary icon-btn" on:click={doImport} disabled={importing || !actualAccountId || hasUnresolved}>
+                {importing ? '…' : hasUnresolved ? `⚠ Review ${unresolvedVerify.length} first` : '⬆ Import to Actual'}
               </button>
             </div>
+          </div>
+        {/if}
+
+        <!-- Duplicate verification panel -->
+        {#if dryRunResult?.toVerify?.length > 0}
+          <div class="verify-panel">
+            <div class="verify-header">
+              <span>⚠ {dryRunResult.toVerify.length} possible duplicate{dryRunResult.toVerify.length > 1 ? 's' : ''} — choose skip or import for each</span>
+              <div class="verify-bulk">
+                <button class="ghost icon-btn" on:click={() => { verifications = Object.fromEntries(dryRunResult.toVerify.map(t => [t.imported_id, 'skip'])); verifications = verifications; }}>Skip all</button>
+                <button class="ghost icon-btn" on:click={() => { verifications = Object.fromEntries(dryRunResult.toVerify.map(t => [t.imported_id, 'import'])); verifications = verifications; }}>Import all</button>
+              </div>
+            </div>
+            {#each dryRunResult.toVerify as t}
+              <div class="verify-row" class:resolved={!!verifications[t.imported_id]}>
+                <span class="verify-date">{t.date}</span>
+                <span class="verify-desc">{t.description}</span>
+                <span class="verify-amt">{t.currency} {t.amount.toFixed(2)}</span>
+                <div class="verify-actions">
+                  <button class="verify-btn" class:active={verifications[t.imported_id] === 'skip'}
+                    on:click={() => { verifications[t.imported_id] = 'skip'; verifications = verifications; }}>Skip</button>
+                  <button class="verify-btn import" class:active={verifications[t.imported_id] === 'import'}
+                    on:click={() => { verifications[t.imported_id] = 'import'; verifications = verifications; }}>Import</button>
+                </div>
+              </div>
+            {/each}
           </div>
         {/if}
 
@@ -485,6 +517,32 @@
   .import-bar-right { display: flex; gap: 8px; flex-shrink: 0; }
   .import-hint { font-size: 13px; color: var(--text2); }
   .dryrun-msg { font-size: 13px; color: var(--accent); background: #6c63ff11; border: 1px solid #6c63ff33; border-radius: 6px; padding: 5px 10px; }
+
+  /* Verification panel */
+  .verify-panel {
+    border-bottom: 1px solid var(--border); background: #ff980011;
+  }
+  .verify-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 20px; font-size: 13px; color: #b45309; font-weight: 500;
+    background: #ff980018; border-bottom: 1px solid #ff980033;
+  }
+  .verify-bulk { display: flex; gap: 6px; }
+  .verify-row {
+    display: flex; align-items: center; gap: 12px; padding: 8px 20px;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .verify-row.resolved { opacity: 0.6; }
+  .verify-date { color: var(--text2); min-width: 90px; flex-shrink: 0; }
+  .verify-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .verify-amt { min-width: 90px; text-align: right; font-weight: 500; flex-shrink: 0; }
+  .verify-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .verify-btn {
+    padding: 3px 10px; border-radius: 5px; font-size: 12px; font-weight: 500;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text2); cursor: pointer;
+  }
+  .verify-btn.active { background: var(--surface2); color: var(--text); border-color: var(--text2); }
+  .verify-btn.import.active { background: #6c63ff22; color: var(--accent); border-color: var(--accent); }
 
   /* Toolbar */
   .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid var(--border); }
