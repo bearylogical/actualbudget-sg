@@ -57,21 +57,37 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
 
     ref_col = next((c for c in data.columns if "ref" in str(c).lower()), None)
 
+    # Detect format: new (Withdrawal/Deposit) vs old (Transaction Amount(Local))
+    cols_lower = {str(c).lower(): c for c in data.columns}
+    new_format = "withdrawal" in cols_lower and "deposit" in cols_lower
+
     txns = []
     for _, row in data.iterrows():
         txn_date = str(row.get("Transaction Date", "")).strip()
-        description = str(row.get("Description", "")).strip()
-        amount_raw = row.get("Transaction Amount(Local)", None)
-        currency = str(row.get("Local Currency Type", "SGD")).strip()
-        foreign_amount = row.get("Transaction Amount(Foreign)", None)
-        foreign_currency = str(row.get("Foreign Currency Type", "")).strip()
+        description = str(row.get("Transaction Description", row.get("Description", ""))).strip()
 
         if not txn_date or txn_date in ("nan", "NaT", "") or not description or description == "nan":
             continue
-        try:
-            amount = float(amount_raw)
-        except (TypeError, ValueError):
-            continue
+
+        if new_format:
+            withdrawal = _to_float(row.get(cols_lower.get("withdrawal")))
+            deposit = _to_float(row.get(cols_lower.get("deposit")))
+            if withdrawal is None and deposit is None:
+                continue
+            amount = -(deposit or 0) if deposit else (withdrawal or 0)
+            currency = "SGD"
+            foreign_amount = None
+            foreign_currency = None
+        else:
+            amount_raw = row.get("Transaction Amount(Local)", None)
+            try:
+                amount = float(amount_raw)
+            except (TypeError, ValueError):
+                continue
+            currency = str(row.get("Local Currency Type", "SGD")).strip()
+            foreign_amount = row.get("Transaction Amount(Foreign)", None)
+            foreign_currency = str(row.get("Foreign Currency Type", "")).strip()
+
         try:
             date_str = pd.to_datetime(txn_date, format="%d %b %Y").strftime("%Y-%m-%d")
         except Exception:
