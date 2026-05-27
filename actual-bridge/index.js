@@ -270,9 +270,20 @@ app.post('/import', async (req, res) => {
     return res.status(400).json({ error: 'accountId and transactions[] required' });
   }
   try {
-    // Fetch existing transactions for the incoming date range to check for duplicates
+    // Fetch existing transactions for the incoming date range (padded ±7 days) to
+    // check for duplicates. The padding catches dupes that fall just outside a
+    // re-imported statement window (e.g. a statement re-saved with the first row trimmed).
     const dates = transactions.map(t => t.date).sort();
-    const existing = await api.getTransactions(accountId, dates[0], dates[dates.length - 1]);
+    const shiftDate = (iso, days) => {
+      const d = new Date(`${iso}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+    const existing = await api.getTransactions(
+      accountId,
+      shiftDate(dates[0], -7),
+      shiftDate(dates[dates.length - 1], 7),
+    );
     const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
 
     // Classify into three buckets
@@ -282,7 +293,12 @@ app.post('/import', async (req, res) => {
 
     for (const t of transactions) {
       const hasRef = t.imported_id && t.imported_id.startsWith('ref-');
-      const idMatch = existingIds.has(t.imported_id) || existingIds.has(t.legacy_id);
+      const legacyIds = Array.isArray(t.legacy_ids)
+        ? t.legacy_ids
+        : (t.legacy_id ? [t.legacy_id] : []);
+      const idMatch =
+        existingIds.has(t.imported_id) ||
+        legacyIds.some(id => id && existingIds.has(id));
 
       if (!idMatch) {
         clearlyNew.push(t);

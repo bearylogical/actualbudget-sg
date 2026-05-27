@@ -8,6 +8,7 @@
 
   const API = '/api';
   const STORAGE_KEY = 'budget-actual-conn';
+  const SECRETS_KEY = 'budget-actual-secrets';
   const dispatch = createEventDispatcher();
 
   // ── Connection inputs ───────────────────────────────────────────────────────
@@ -15,6 +16,7 @@
   let password = '';
   let encryptionPassword = '';
   let useEncryption = false;
+  let sameAsServerPassword = true; // reuse server password as encryption password
 
   // ── Actual state ────────────────────────────────────────────────────────────
   export let connected = false;         // true once init succeeds
@@ -44,17 +46,33 @@
       const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       if (s.serverURL) serverURL = s.serverURL;
       if (s.useEncryption) useEncryption = s.useEncryption;
+      if (typeof s.sameAsServerPassword === 'boolean') sameAsServerPassword = s.sameAsServerPassword;
       if (s.selectedBudgetGroupId) selectedBudgetGroupId = s.selectedBudgetGroupId;
       if (s.selectedAccountId) selectedAccountId = s.selectedAccountId;
+    } catch {}
+    try {
+      const sec = JSON.parse(sessionStorage.getItem(SECRETS_KEY) || '{}');
+      if (sec.password) password = sec.password;
+      if (sec.encryptionPassword) encryptionPassword = sec.encryptionPassword;
     } catch {}
   });
 
   function persist() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        serverURL, useEncryption, selectedBudgetGroupId, selectedAccountId
+        serverURL, useEncryption, sameAsServerPassword, selectedBudgetGroupId, selectedAccountId
       }));
     } catch {}
+  }
+
+  function persistSecrets() {
+    try {
+      sessionStorage.setItem(SECRETS_KEY, JSON.stringify({ password, encryptionPassword }));
+    } catch {}
+  }
+
+  function clearSecrets() {
+    try { sessionStorage.removeItem(SECRETS_KEY); } catch {}
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -89,6 +107,7 @@
       connected = true;
       section = 'budget';
       persist();
+      persistSecrets();
     } catch (e) { error = e.message; }
     finally { loadingConnect = false; }
   }
@@ -98,7 +117,10 @@
     loadingBudget = true; error = '';
     try {
       const body = { serverURL, password, budgetId: selectedBudgetGroupId };
-      if (useEncryption && encryptionPassword) body.encryptionPassword = encryptionPassword;
+      if (useEncryption) {
+        const enc = sameAsServerPassword ? password : encryptionPassword;
+        if (enc) body.encryptionPassword = enc;
+      }
       const res = await fetch(`${API}/actual/budgets/load`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -112,6 +134,7 @@
       budgetLoaded = true;
       section = 'ready';
       persist();
+      persistSecrets();
       notify();
       fetchBudgetMonth();
     } catch (e) { error = e.message; }
@@ -139,7 +162,9 @@
     connected = false; budgetLoaded = false;
     budgets = []; accounts = []; categoryGroups = []; payees = []; rules = [];
     selectedBudgetGroupId = ''; selectedAccountId = '';
+    password = ''; encryptionPassword = '';
     budgetMonthData = null; section = 'connect'; error = '';
+    clearSecrets();
     notify();
   }
 
@@ -206,9 +231,15 @@
         End-to-end encryption
       </label>
       {#if useEncryption}
-        <label>Encryption Password
-          <input type="password" bind:value={encryptionPassword} />
+        <label class="row-label">
+          <input type="checkbox" bind:checked={sameAsServerPassword} />
+          Use server password for encryption
         </label>
+        {#if !sameAsServerPassword}
+          <label>Encryption Password
+            <input type="password" bind:value={encryptionPassword} />
+          </label>
+        {/if}
       {/if}
       <button class="primary" on:click={connect} disabled={loadingConnect}>
         {#if loadingConnect}<span class="spinner"></span>{:else}Connect{/if}

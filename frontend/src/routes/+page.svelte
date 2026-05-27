@@ -51,6 +51,8 @@
   let importError = '';
   let dryRunResult = null;
   let verifications = {};       // { [imported_id]: 'skip' | 'import' } for ambiguous dupes
+  let includeCredits = true;    // send credit (deposit/refund) rows alongside debits
+  let confirmDestination = false; // user must tick "import to this account" before import
 
   // ── Category colours ─────────────────────────────────────────────────────────
   const CAT_COLORS = {
@@ -80,6 +82,7 @@
     });
 
   $: spending = transactions.filter(t => !t.is_credit);
+  $: importable = includeCredits ? transactions : spending;
   $: totalSpend = spending.reduce((s, t) => s + t.amount, 0);
   $: categorisedCount = transactions.filter(t => t.category !== 'Uncategorized').length;
 
@@ -153,22 +156,31 @@
   $: if (actualBudgetLoaded && spending.length) rebuildCategoryMap();
 
   // ── Import ────────────────────────────────────────────────────────────────────
-  // Backend now generates imported_id (ref-based or hash); legacy_id covers old stmt-... format
-  function legacyId(t) {
+  // Backend now generates imported_id (ref-based or hash); legacy ids cover older formats.
+  function legacyStmtId(t) {
     return `stmt-${t.date}-${t.description}-${t.amount}`.replace(/\s+/g, '-');
   }
 
-  function buildPayload(dr = false) {
+  // Old hash format: sha256("date|desc|abs(amount)")[:16] — kept so re-imports of
+  // statements ingested before the sign/currency-aware hash still match existing rows.
+  async function legacyHash(t) {
+    const enc = new TextEncoder().encode(`${t.date}|${t.description}|${Math.abs(t.amount)}`);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  }
+
+  async function buildPayload(dr = false) {
+    const rows = await Promise.all(importable.map(async t => ({
+      ...t,
+      category_id: categoryMap[t.category] || undefined,
+      notes: t.category,
+      legacy_ids: [legacyStmtId(t), await legacyHash(t)],
+    })));
     return {
       accountId: actualAccountId,
       dryRun: dr,
       verified: verifications,
-      transactions: spending.map(t => ({
-        ...t,
-        category_id: categoryMap[t.category] || undefined,
-        notes: t.category,
-        legacy_id: legacyId(t),
-      })),
+      transactions: rows,
     };
   }
 
@@ -179,9 +191,10 @@
     if (!actualAccountId) { importError = 'Select an account in the sidebar first'; return; }
     importing = true; importError = ''; dryRunResult = null; verifications = {};
     try {
+      const payload = await buildPayload(true);
       const res = await fetch(`${API}/actual/import`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload(true))
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -192,17 +205,30 @@
 
   async function doImport() {
     if (!actualAccountId) { importError = 'Select an account in the sidebar first'; return; }
+    if (!confirmDestination) { importError = 'Tick "Yes, import to this account" to confirm the destination'; return; }
     importing = true; importError = ''; importResult = null;
     try {
+      const payload = await buildPayload(false);
       const res = await fetch(`${API}/actual/import`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload(false))
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       importResult = data;
+      confirmDestination = false;
     } catch (e) { importError = e.message; }
     finally { importing = false; }
+  }
+
+  // Reset confirmation whenever the destination account changes.
+  $: { actualAccountId; confirmDestination = false; }
+
+  $: destinationAccount = actualAccounts.find(a => a.id === actualAccountId);
+  $: newCountEstimate = importable.length;
+  function fmtAccountBalance(b) {
+    if (b === null || b === undefined) return '';
+    return (b / 100).toLocaleString('en-SG', { style: 'currency', currency: 'SGD' });
   }
 
   // ── CSV export ────────────────────────────────────────────────────────────────
@@ -322,22 +348,47 @@
                 <span class="error-msg">{importError}</span>
               {:else}
                 <span class="import-hint">
-                  {actualAccountId ? `Ready to import ${spending.length} transactions` : '← Select account in sidebar'}
+                  {actualAccountId ? `Ready to import ${importable.length} transactions` : '← Select account in sidebar'}
                 </span>
               {/if}
             </div>
             <div class="import-bar-right">
+              <label class="checkbox-inline" title="Include deposit/refund rows alongside debits">
+                <input type="checkbox" bind:checked={includeCredits} />
+                Credits
+              </label>
               <button class="ghost icon-btn" on:click={() => { rebuildCategoryMap(); showMapper = true; }}>
-                🗂 Categories ({Object.values(categoryMap).filter(Boolean).length}/{[...new Set(spending.map(t=>t.category))].length} mapped)
+                🗂 Categories ({Object.values(categoryMap).filter(Boolean).length}/{[...new Set(importable.map(t=>t.category))].length} mapped)
               </button>
               <button class="ghost icon-btn" on:click={runDryRun} disabled={importing || !actualAccountId}>
                 {importing ? '…' : '🔍 Dry Run'}
               </button>
-              <button class="primary icon-btn" on:click={doImport} disabled={importing || !actualAccountId || hasUnresolved}>
+              <button class="primary icon-btn" on:click={doImport} disabled={importing || !actualAccountId || hasUnresolved || !confirmDestination}>
                 {importing ? '…' : hasUnresolved ? `⚠ Review ${unresolvedVerify.length} first` : '⬆ Import to Actual'}
               </button>
             </div>
           </div>
+
+          {#if actualAccountId && destinationAccount}
+            <div class="confirm-card">
+              <div class="confirm-row">
+                <span class="confirm-label">Destination</span>
+                <strong>{destinationAccount.name}</strong>
+                {#if destinationAccount.balance !== null && destinationAccount.balance !== undefined}
+                  <span class="confirm-balance">· {fmtAccountBalance(destinationAccount.balance)}</span>
+                {/if}
+              </div>
+              <div class="confirm-row counts">
+                <span><strong>{dryRunResult?.added ?? newCountEstimate}</strong> new</span>
+                <span><strong>{dryRunResult?.skipped ?? '—'}</strong> duplicate</span>
+                <span><strong>{dryRunResult?.toVerify?.length ?? 0}</strong> need review</span>
+              </div>
+              <label class="confirm-check">
+                <input type="checkbox" bind:checked={confirmDestination} />
+                Yes, import to <strong>{destinationAccount.name}</strong>
+              </label>
+            </div>
+          {/if}
         {/if}
 
         <!-- Duplicate verification panel -->
@@ -517,6 +568,21 @@
   .import-bar-right { display: flex; gap: 8px; flex-shrink: 0; }
   .import-hint { font-size: 13px; color: var(--text2); }
   .dryrun-msg { font-size: 13px; color: var(--accent); background: #6c63ff11; border: 1px solid #6c63ff33; border-radius: 6px; padding: 5px 10px; }
+  .checkbox-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); user-select: none; }
+  .checkbox-inline input { margin: 0; }
+
+  /* Destination confirmation card */
+  .confirm-card {
+    margin: 10px 20px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); display: flex; flex-direction: column; gap: 8px;
+  }
+  .confirm-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text2); flex-wrap: wrap; }
+  .confirm-row strong { color: var(--text); }
+  .confirm-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
+  .confirm-balance { color: var(--text2); }
+  .confirm-row.counts { gap: 16px; }
+  .confirm-check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; padding-top: 4px; border-top: 1px dashed var(--border); }
+  .confirm-check input { margin: 0; }
 
   /* Verification panel */
   .verify-panel {
