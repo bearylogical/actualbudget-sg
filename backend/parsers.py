@@ -25,7 +25,7 @@ def _std(date: str, desc: str, amount: float, currency: str = "SGD",
     if ref:
         imported_id = f"ref-{ref}"
     else:
-        imported_id = hashlib.sha256(f"{date}|{desc}|{abs(amount)}".encode()).hexdigest()[:16]
+        imported_id = hashlib.sha256(f"{date}|{desc}|{amount:.2f}|{currency}".encode()).hexdigest()[:16]
     return {
         "date": date,
         "description": desc,
@@ -213,9 +213,11 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
 def _to_float(val) -> Optional[float]:
     if val is None:
         return None
+    s = str(val).replace(",", "").strip()
+    if not s or s.lower() in ("nan", "none"):
+        return None
     try:
-        f = float(str(val).replace(",", "").strip())
-        return f if f != 0 else None
+        return float(s)
     except (ValueError, TypeError):
         return None
 
