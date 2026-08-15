@@ -319,11 +319,11 @@
               <p class="drop-title">Drop your bank statement here</p>
               <p class="drop-sub">or click to browse</p>
               <div class="banks">
-                <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span>XLS / XLSX</span>
+                <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span>XLS / XLSX / PDF</span>
               </div>
             {/if}
           </div>
-          <input id="fi" type="file" accept=".xls,.xlsx" style="display:none"
+          <input id="fi" type="file" accept=".xls,.xlsx,.pdf" style="display:none"
             on:change={e => uploadFile(e.target.files[0])} />
           {#if parseError}
             <div class="error-msg">{parseError}</div>
