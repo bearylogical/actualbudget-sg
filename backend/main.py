@@ -7,7 +7,8 @@ import subprocess
 import tempfile
 import os
 import httpx
-from parsers import detect_and_parse
+from pypdf import PdfReader
+from parsers import detect_and_parse, detect_and_parse_pdf
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -23,7 +24,7 @@ app.add_middleware(
 
 def to_xlsx(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Convert uploaded file to DataFrame, handling .xls via LibreOffice."""
-    suffix = ".xlsx" if filename.endswith(".xlsx") else ".xls"
+    suffix = ".xlsx" if filename.lower().endswith(".xlsx") else ".xls"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
@@ -45,15 +46,59 @@ def to_xlsx(file_bytes: bytes, filename: str) -> pd.DataFrame:
         os.unlink(tmp_path)
 
 
+def extract_pdf_text(file_bytes: bytes) -> str:
+    """Extract PDF text, preserving column layout so statement rows stay intact."""
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise HTTPException(400, f"Could not read PDF: {e}")
+
+    if reader.is_encrypted:
+        try:
+            unlocked = bool(reader.decrypt(""))
+        except Exception:
+            unlocked = False
+        if not unlocked:
+            raise HTTPException(
+                400,
+                "This PDF is password-protected. Please remove the password and re-upload.",
+            )
+
+    pages = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text(extraction_mode="layout") or "")
+        except Exception:
+            pages.append("")      # a page with no extractable text shouldn't sink the upload
+    text = "\n".join(pages)
+
+    if not text.strip():
+        raise HTTPException(
+            400,
+            "No text found in this PDF — it looks like a scan or an image. "
+            "Only text-based statements can be parsed.",
+        )
+    return text
+
+
 @app.post("/parse")
 async def parse_statement(file: UploadFile = File(...)):
-    if not file.filename.endswith((".xls", ".xlsx")):
-        raise HTTPException(400, "Only .xls or .xlsx files supported")
+    filename = file.filename or ""
+    if not filename.lower().endswith((".xls", ".xlsx", ".pdf")):
+        raise HTTPException(400, "Only .xls, .xlsx or .pdf files supported")
     content = await file.read()
     try:
-        df = to_xlsx(content, file.filename)
-        transactions, bank = detect_and_parse(df, hint=file.filename)
+        if filename.lower().endswith(".pdf"):
+            text = extract_pdf_text(content)
+            transactions, bank = detect_and_parse_pdf(text, hint=filename)
+        else:
+            df = to_xlsx(content, filename)
+            transactions, bank = detect_and_parse(df, hint=filename)
         return {"transactions": transactions, "count": len(transactions), "bank": bank}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(400, str(e))      # unrecognised / unsupported statement
     except Exception as e:
         raise HTTPException(500, str(e))
 

@@ -17,7 +17,7 @@ Open **http://localhost:3000**
 ```
 browser → frontend (Nginx :3000)
               ↓ /api/*
-         backend (FastAPI :8000)   ← parses XLS, categorises, exports CSV
+         backend (FastAPI :8000)   ← parses XLS/PDF, categorises, exports CSV
               ↓ http://actual-bridge:3001
          actual-bridge (Node :3001) ← @actual-app/api ↔ Actual Server
 ```
@@ -29,7 +29,7 @@ Three containers, one `docker compose up`.
 ## Usage
 
 ### 1. Parse your statement
-- Drag & drop your UOB `.xls` or `.xlsx` credit card export
+- Drag & drop your credit card statement — `.xls`, `.xlsx`, or a UOB `.pdf` e-statement
 - Transactions are auto-categorised into 18 categories using keyword rules
 - Review, search, filter, and manually override any category by clicking it
 
@@ -99,8 +99,51 @@ Rebuild the backend container after changes: `docker compose up --build backend`
 
 ## Supported Statement Formats
 
-| Bank | Format | Status |
-|---|---|---|
-| UOB Credit Card | `.xls` / `.xlsx` | ✅ Supported |
+| Bank | Statement | Format | Status |
+|---|---|---|---|
+| UOB | Credit card | `.xls` / `.xlsx` | ✅ Supported |
+| UOB | Credit card | `.pdf` e-statement | ✅ Supported |
+| UOB | Account (One / savings / current) | `.xls` / `.xlsx` | ✅ Supported |
+| UOB | Account (One / savings / current) | `.pdf` e-statement | ✅ Supported |
+| DBS / POSB | Account | `.xls` / `.xlsx` | ✅ Supported |
+| OCBC | Account | `.xls` / `.xlsx` | ✅ Supported |
 
-PRs welcome for DBS, OCBC, Maybank, etc.
+The bank, statement type, and format are auto-detected from the file contents —
+just drop the file in.
+
+### References and de-duplication
+
+UOB doesn't give the reference its own column: it packs it into the description
+cell (`Ref No: 7412345…` on card statements, `PIB1234…` on account statements).
+Both parsers pull it out and use it as the import ID, which means **the same
+transaction imported from the `.xls` and from the PDF de-duplicates correctly**
+— they carry the same reference. Rows without one (pending transactions,
+interest, some GIRO credits) fall back to a hash of date, description, and
+amount.
+
+This matters more than it sounds: a hash can't tell apart two genuinely separate
+purchases made at the same merchant, for the same amount, on the same day. The
+reference can.
+
+### Format notes
+
+**Card statements** are laid out as `Post Date | Trans Date | Description |
+Amount`, with a trailing `CR` marking credits, and an optional foreign-currency
+line beneath the reference.
+
+**Account statements** have a single date column and decide debit vs credit by
+which column an amount sits under (`Withdrawals` / `Deposits`), so amounts are
+matched to the column headings by position. The running `Balance` column is read
+and discarded — taking the last number on the line would import balances as
+transaction amounts. The payee usually sits on a continuation line below the
+transaction type, so lines are joined (`PAYNOW-FAST - EXAMPLE PAY PTE. LTD.`) and
+identifier-only lines such as masked card numbers are dropped.
+
+**Dates** on PDF line items carry no year. It's inferred from the statement date
+(or the period end), with entries falling after it rolled back a year — which
+keeps December rows on a January statement correct.
+
+Password-protected PDFs, and scanned/image PDFs with no extractable text, are
+rejected with a clear message.
+
+PRs welcome for Maybank, Citi, etc.
