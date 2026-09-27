@@ -512,6 +512,56 @@ function shift(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// ── Finance summary for the Money dashboard ─────────────────────────────────
+// GET /finance/summary?months=6 → accounts + balances, budget months (income,
+// spending, per-category spent/budgeted), and this month's uncategorised rows.
+app.get('/finance/summary', async (req, res) => {
+  if (!requireBudget(res)) return;
+  const n = Math.min(24, Math.max(1, parseInt(req.query.months || '6', 10)));
+  try {
+    const accounts = (await api.getAccounts()).filter(a => !a.closed);
+    const withBal = [];
+    for (const a of accounts) {
+      let balance = null;
+      try { balance = await api.getAccountBalance(a.id); } catch (_) {}
+      withBal.push({ id: a.id, name: a.name, offbudget: !!a.offbudget, balance });
+    }
+    const now = new Date();
+    const months = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      const m = d.toISOString().slice(0, 7);
+      try {
+        const b = await api.getBudgetMonth(m);
+        months.push({
+          month: m,
+          income: b.totalIncome ?? 0, spent: b.totalSpent ?? 0, budgeted: b.totalBudgeted ?? 0,
+          toBudget: b.toBudget ?? 0,
+          categories: (b.categoryGroups || []).flatMap(g => (g.categories || []).map(c => ({
+            id: c.id, name: c.name, group: g.name, is_income: !!g.is_income,
+            budgeted: c.budgeted ?? 0, spent: c.spent ?? 0, balance: c.balance ?? 0,
+            received: c.received ?? 0,
+          }))),
+        });
+      } catch (e) { months.push({ month: m, error: errMsg(e) }); }
+    }
+    // this month's uncategorised on-budget rows (not transfers, not starting balances)
+    const first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    const today = now.toISOString().slice(0, 10);
+    let uncategorised = { count: 0, amount: 0 };
+    for (const a of accounts.filter(x => !x.offbudget)) {
+      for (const t of await api.getTransactions(a.id, first, today)) {
+        if (!t.category && !t.transfer_id && !t.starting_balance_flag && !t.is_parent) {
+          uncategorised.count++; uncategorised.amount += t.amount;
+        }
+      }
+    }
+    res.json({ accounts: withBal, months, uncategorised, today });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e) });
+  }
+});
+
 app.post('/preview', async (req, res) => {
   if (!requireBudget(res)) return;
   const { accountId, startDate, endDate } = req.body;

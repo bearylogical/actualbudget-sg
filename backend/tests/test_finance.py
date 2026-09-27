@@ -1,0 +1,69 @@
+from datetime import date
+
+import httpx
+
+import finance
+import ghostfolio
+
+
+def month(m, income, spent, cats=()):
+    return {"month": m, "income": income, "spent": -spent, "budgeted": 0, "toBudget": 0,
+            "categories": [{"id": n, "name": n, "group": "G", "is_income": False, "budgeted": 0,
+                            "spent": -v, "balance": -v} for n, v in cats]}
+
+
+ACTUAL = {
+    "today": "2026-09-15",
+    "accounts": [{"id": "sav", "name": "UOB One Account", "offbudget": False, "balance": 2_000_000},
+                 {"id": "card", "name": "UOB One Card", "offbudget": False, "balance": -150_000},
+                 {"id": "cpf", "name": "CPF OA", "offbudget": True, "balance": 5_000_000}],
+    "months": [month("2026-05", 0, 0), month("2026-06", 100_000, 50_000),           # partial first month
+               month("2026-07", 800_000, 300_000, [("Dining", 60_000), ("Shopping", 20_000)]),
+               month("2026-08", 800_000, 300_000, [("Dining", 60_000), ("Shopping", 20_000)]),
+               month("2026-09", 400_000, 200_000, [("Dining", 25_000), ("Shopping", 60_000)])],
+    "uncategorised": {"count": 2, "amount": -3_000},
+}
+
+
+def test_compute_core_numbers_and_guidance():
+    ghost = {"configured": True, "value": 10_000.0}
+    r = finance.compute(ACTUAL, ghost, {"card"}, review_pending=1, today=date(2026, 9, 15))
+    assert r["cash"] == 2_000_000 and r["card_owed"] == 150_000
+    assert r["net_worth"] == 2_000_000 - 150_000 + 5_000_000 + 1_000_000
+    assert r["baseline_months"] == ["2026-07", "2026-08"]          # empty + partial first month skipped
+    assert r["avg_spend"] == 300_000 and round(r["savings_rate"], 3) == 0.625
+    assert r["month"]["usual_by_today"] == 150_000 and r["month"]["projected"] == 400_000
+    assert r["month"]["safe_per_day"] == round(100_000 / 16)
+    titles = [g["title"] for g in r["guidance"]]
+    assert any("waiting in Review" in t for t in titles)
+    assert any("ahead of your usual pace" in t for t in titles)
+    shop = next(c for c in r["categories"] if c["name"] == "Shopping")
+    assert shop["status"] == "serious"                             # 600 vs usual 200 for the whole month
+    assert r["cashflow"][0]["month"] == "2026-06"
+
+
+def test_ghostfolio_summary_and_auth(monkeypatch):
+    monkeypatch.setenv("GHOSTFOLIO_URL", "http://gf")
+    monkeypatch.setenv("GHOSTFOLIO_TOKEN", "tok")
+    ghostfolio._jwt.update(token=None, exp=0)
+
+    def handler(req):
+        p = req.url.path
+        if p == "/api/v1/auth/anonymous":
+            return httpx.Response(200, json={"authToken": "jwt"})
+        assert req.headers["authorization"] == "Bearer jwt"
+        if p == "/api/v1/account":
+            return httpx.Response(200, json={"accounts": [{"name": "IBKR", "valueInBaseCurrency": 100.5}],
+                                             "totalValueInBaseCurrency": 100.5, "totalBalanceInBaseCurrency": 3})
+        if p == "/api/v2/portfolio/performance":
+            return httpx.Response(200, json={"performance": {"netPerformancePercentageWithCurrencyEffect": 0.05}})
+        if p == "/api/v1/portfolio/holdings":
+            return httpx.Response(200, json={"holdings": [{"name": "VWRA", "symbol": "VWRA.L", "valueInBaseCurrency": 100.5}]})
+        return httpx.Response(200, json={})
+    s = ghostfolio.summary(httpx.MockTransport(handler))
+    assert s["value"] == 100.5 and s["performance_ytd"] == 0.05 and s["holdings"][0]["symbol"] == "VWRA.L"
+
+
+def test_ghostfolio_not_configured(monkeypatch):
+    monkeypatch.delenv("GHOSTFOLIO_URL", raising=False)
+    assert ghostfolio.summary() == {"configured": False}

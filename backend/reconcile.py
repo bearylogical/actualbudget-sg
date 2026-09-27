@@ -127,6 +127,9 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
     in_period = [a for a in top if start <= a["date"] <= as_of]
     stmt = [t for t in statement_rows if start <= t["date"] <= as_of]
     matched, missing, extra = match(stmt, in_period)
+    if not statement_rows:
+        # balance-only check (no statement uploaded): nothing to match against
+        extra = []
     history_before = any(a["date"] < start for a in top)
 
     dups = review.find_existing_duplicates(in_period)
@@ -236,6 +239,13 @@ def recommend(r: dict, missing: list[dict], extra: list[dict]) -> list[dict]:
             plans.append({"fix_type": "investigate", "title": f"{len(other_extra)} row(s) in Actual aren't on the statement",
                           "why": "not applied automatically — could be hand-typed, wrong account, or a transfer counterpart",
                           "actions": [], "effect": 0, "rows": [_brief_a(a) for a in other_extra][:20]})
+    if (gap is not None and gap != sum(p["effect"] for p in plans)
+            and not any(p["fix_type"] in ("opening_balance", "delete_extra", "investigate") for p in plans)):
+        rest = gap - sum(p["effect"] for p in plans)
+        plans.append({"fix_type": "investigate", "title": f"Unexplained difference of {rest/100:,.2f}",
+                      "why": "no duplicates, missing rows or opening-balance gap explain it — upload the statement "
+                             "for a row-by-row check, or approve an adjustment if you're sure the bank is right",
+                      "actions": [], "effect": 0})
     return plans
 
 

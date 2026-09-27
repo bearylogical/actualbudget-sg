@@ -65,6 +65,7 @@ All config is via environment variables in `docker-compose.yml`.
 | `REVIEW_LEARN_AFTER` | `2` | identical decisions before a pattern resolves itself |
 | `REIMPORT_DELETED` (bridge) | `false` | re-import transactions you deleted in Actual |
 | `SKIP_PENDING` | `true` | hold back unposted card rows |
+| `GHOSTFOLIO_URL` / `GHOSTFOLIO_TOKEN` | — | investments on the Money dashboard + IBKR sync |
 | `PORT` (bridge) | `3001` | Bridge listen port |
 
 The bridge caches budget data in a Docker volume (`actual-data`), so subsequent loads of the same budget are fast.
@@ -122,6 +123,20 @@ Set in `docker-compose.yml` (`x-llm-env`):
 Only payee names and statement descriptions are sent — no account numbers or balances.
 The model must choose from your Actual categories; answers are cached per payee in
 `/data/llm_cache.json`, so each merchant is asked once.
+
+## 💰 Money dashboard
+
+`/money` combines Actual (cash, cards, spending) with Ghostfolio (investments):
+net worth, cash, card owed, savings rate, emergency buffer, this month's pace vs your usual
+month, safe-to-spend per day, category pacing, 6-month cash flow, accounts and top holdings,
+plus a guidance list (every number is computed, not guessed) and an optional **AI brief**.
+Set `GHOSTFOLIO_URL` / `GHOSTFOLIO_TOKEN` to include investments.
+
+## Claude / MCP
+
+See [docs/MCP.md](docs/MCP.md): a budget-app MCP server (`mcp/server.py`) exposes the money
+summary, review queue, reconciliation and IBKR → Ghostfolio sync to Claude; pair it with the
+read-only Actual MCP and Ghostfolio MCP.
 
 ## Which account? (recommender)
 
