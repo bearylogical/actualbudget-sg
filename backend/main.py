@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 import pandas as pd
 import io
@@ -12,6 +12,7 @@ from pipeline import enrich
 from llm import LLMCategorizer
 from rules_audit import audit, to_markdown
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
+import health
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -46,41 +47,20 @@ async def require_context() -> ActualContext:
     return ctx
 
 
-def extract_pdf_text(file_bytes: bytes) -> str:
-    """Extract PDF text, preserving column layout so statement rows stay intact."""
-    try:
-        reader = PdfReader(io.BytesIO(file_bytes))
-    except Exception as e:
-        raise HTTPException(400, f"Could not read PDF: {e}")
+# ── Health ───────────────────────────────────────────────────────────────────
 
-    if reader.is_encrypted:
-        try:
-            unlocked = bool(reader.decrypt(""))
-        except Exception:
-            unlocked = False
-        if not unlocked:
-            raise HTTPException(
-                400,
-                "This PDF is password-protected. Please remove the password and re-upload.",
-            )
+@app.get("/health/live")
+async def health_live():
+    """Process is up. Used by the Docker healthcheck — no dependencies checked."""
+    return {"ok": True}
 
-    pages = []
-    for page in reader.pages:
-        try:
-            pages.append(page.extract_text(extraction_mode="layout") or "")
-        except Exception:
-            pages.append(
-                ""
-            )  # a page with no extractable text shouldn't sink the upload
-    text = "\n".join(pages)
 
-    if not text.strip():
-        raise HTTPException(
-            400,
-            "No text found in this PDF — it looks like a scan or an image. "
-            "Only text-based statements can be parsed.",
-        )
-    return text
+@app.get("/health")
+async def health_full(llm: str = "", strict: bool = False):
+    """All services. ?llm=refresh re-tests the LLM now; ?strict=1 returns 503 unless ok."""
+    report = await health.full_report(BRIDGE_URL, refresh_llm=(llm == "refresh"))
+    code = 503 if strict and report["status"] != "ok" else 200
+    return JSONResponse(report, status_code=code)
 
 
 @app.post("/parse")
@@ -268,11 +248,18 @@ async def export_csv(data: dict):
 
 
 async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30):
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        if method == "GET":
-            r = await client.get(f"{BRIDGE_URL}{path}")
-        else:
-            r = await client.post(f"{BRIDGE_URL}{path}", json=body or {})
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if method == "GET":
+                r = await client.get(f"{BRIDGE_URL}{path}")
+            else:
+                r = await client.post(f"{BRIDGE_URL}{path}", json=body or {})
+    except httpx.TimeoutException:
+        raise HTTPException(504, f"actual-bridge did not answer within {timeout}s — it may be stuck "
+                                 "reaching your Actual server (DNS / TLS / firewall from inside Docker?)")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Can't reach actual-bridge at {BRIDGE_URL} ({type(e).__name__}) — "
+                                 "is the container running? `docker compose logs actual-bridge`")
     if not r.is_success:
         try:
             detail = r.json().get("error", r.text)

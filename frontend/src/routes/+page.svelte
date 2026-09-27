@@ -4,6 +4,7 @@
   import CategoryMapper from "../components/CategoryMapper.svelte";
   import RulesAudit from "../components/RulesAudit.svelte";
   import { onMount } from "svelte";
+  import HealthStatus from "../components/HealthStatus.svelte";
 
   const API = "/api";
 
@@ -556,6 +557,7 @@
           </button>
         </div>
       {/if}
+          <HealthStatus />
     </header>
 
     <div class="content">
@@ -580,7 +582,7 @@
               <p class="drop-sub">or click to browse</p>
               <div class="banks">
                 <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span
-                  >XLS / XLSX / CSV</span
+                  >XLS / XLSX / CSV / PDF</span
                 >
               </div>
             {/if}
@@ -588,7 +590,7 @@
           <input
             id="fi"
             type="file"
-            accept=".xls,.xlsx,.csv"
+            accept=".xls,.xlsx,.csv,.pdf"
             style="display:none"
             on:change={(e) => uploadFile(e.target.files[0])}
           />

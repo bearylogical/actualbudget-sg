@@ -5,6 +5,7 @@
 -->
 <script>
   import { onMount, createEventDispatcher } from 'svelte';
+  import { readJson } from '../lib/http.js';
 
   const API = '/api';
   const STORAGE_KEY = 'budget-actual-conn';
@@ -101,8 +102,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverURL, password })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await readJson(res);
       budgets = data.budgets;
       connected = true;
       section = 'budget';
@@ -125,8 +125,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await readJson(res);
       accounts = data.accounts;
       categoryGroups = data.categoryGroups;
       payees = data.payees ?? [];

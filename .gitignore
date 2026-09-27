@@ -8,3 +8,5 @@ frontend/build/
 samples/
 watch/
 *.xls
+# secrets (LLM keys etc.)
+.env
