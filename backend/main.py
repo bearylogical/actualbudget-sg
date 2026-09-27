@@ -6,7 +6,8 @@ import pandas as pd
 import io
 import os
 import httpx
-from parsers import parse_bytes, SUPPORTED_EXTENSIONS
+from parsers import parse_bytes, parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
+import accounts as acct
 from actual_rules import ActualContext
 from pipeline import enrich
 from llm import LLMCategorizer
@@ -72,21 +73,69 @@ async def parse_statement(
         raise HTTPException(400, f"Supported files: {', '.join(SUPPORTED_EXTENSIONS)}")
     content = await file.read()
     try:
-        transactions, bank = await run_in_threadpool(
-            parse_bytes, content, file.filename or ""
+        transactions, bank, info = await run_in_threadpool(
+            parse_statement_bytes, content, file.filename or ""
         )
     except Exception as e:
         raise HTTPException(422, f"Could not parse statement: {e}")
     ctx = await get_context()
+    account = await recommend_account(info, transactions) if ctx else _no_recommendation(info)
+    # an explicit choice wins; otherwise use a confident recommendation so account-scoped
+    # Actual rules are previewed correctly
+    use_account = account_id or (account["recommended"] if account.get("auto_select") else None)
     result = await run_in_threadpool(
-        enrich, transactions, ctx, account_id=account_id or None, use_llm=use_llm
+        enrich, transactions, ctx, account_id=use_account, use_llm=use_llm
     )
     return {
         **result,
         "count": len(result["transactions"]),
         "bank": bank,
+        "statement": info.to_dict(),
+        "account": account,
         "actual_connected": ctx is not None,
     }
+
+
+def _no_recommendation(info) -> dict:
+    return {"statement": info.to_dict(), "suggestions": [], "recommended": None,
+            "auto_select": False, "remembered": acct.load_map().get(info.fingerprint, {}).get("account_id")}
+
+
+async def recommend_account(info, transactions: list[dict]) -> dict:
+    """Rank Actual accounts for this statement (see accounts.py)."""
+    try:
+        data = await _bridge("POST", "/accounts/match", acct.match_request(transactions), timeout=90)
+    except HTTPException:
+        return _no_recommendation(info)
+    rows = data.get("accounts", [])
+    return acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
+
+
+@app.post("/accounts/recommend")
+async def accounts_recommend(body: dict):
+    """Re-rank after connecting to Actual: {statement, transactions}."""
+    info = acct.StatementInfo.from_dict(body.get("statement"))
+    if await get_context() is None:
+        return _no_recommendation(info)
+    return await recommend_account(info, body.get("transactions") or [])
+
+
+@app.post("/accounts/remember")
+async def accounts_remember(body: dict):
+    """After a successful import: {fingerprint, account_id, account_name}."""
+    if not body.get("fingerprint") or not body.get("account_id"):
+        raise HTTPException(400, "fingerprint and account_id required")
+    return {"map": acct.remember(body["fingerprint"], body["account_id"], body.get("account_name", ""))}
+
+
+@app.get("/accounts/map")
+async def accounts_map():
+    return {"map": acct.load_map()}
+
+
+@app.post("/accounts/forget")
+async def accounts_forget(body: dict):
+    return {"map": acct.forget(body.get("fingerprint", ""))}
 
 
 @app.post("/categorize")

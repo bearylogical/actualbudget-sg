@@ -42,7 +42,8 @@ def enrich(transactions: list[dict], ctx: ActualContext | None = None, *,
     for i, src in enumerate(transactions):
         t = dict(src)
         # recompute the seed guess from the raw text so enrich() is idempotent
-        seed = categorize(t.get("description", ""), bool(t.get("is_credit")), t.get("merchant"))
+        seed = categorize(t.get("match_text") or t.get("description", ""), bool(t.get("is_credit")),
+                          t.get("merchant"))
         seed_cat = seed["category"] if seed["source"] == "seed" else None
         t.update(payee=seed["payee"], kind=seed["kind"], category=seed["category"],
                  confidence=seed["confidence"], source=seed["source"],

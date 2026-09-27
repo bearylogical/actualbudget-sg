@@ -5,6 +5,7 @@
   import RulesAudit from "../components/RulesAudit.svelte";
   import { onMount } from "svelte";
   import HealthStatus from "../components/HealthStatus.svelte";
+  import AccountSuggestion from "../components/AccountSuggestion.svelte";
 
   const API = "/api";
 
@@ -55,6 +56,9 @@
   let catStats = null; // { actual, seed, llm, manual, transfer, review, unmapped }
   let recategorising = false;
   let taxonomy = []; // fallback category list when Actual isn't connected
+  let statementInfo = null; // what the statement is: bank, card vs savings, last 4, balance
+  let accountRec = null; // recommender result: { suggestions, recommended, auto_select }
+  let accountTouched = false; // user picked an account themselves after this upload
   let importing = false;
   let importResult = null;
   let importError = "";
@@ -167,6 +171,9 @@
       transactions = data.transactions.map((t, i) => ({ ...t, id: i }));
       catStats = data.stats;
       detectedBank = data.bank || "";
+      statementInfo = data.statement || null;
+      accountTouched = false;
+      applyAccountRec(data.account);
       lastCtxKey = ctxKey;
     } catch (e) {
       parseError = e.message;
@@ -356,6 +363,7 @@
       if (!res.ok) throw new Error(data.error);
       importResult = data;
       confirmDestination = false;
+      await rememberAccount();
       if (learnRules) await learnFromManualEdits();
     } catch (e) {
       importError = e.message;
@@ -400,6 +408,60 @@
   }
 
   $: destinationAccount = actualAccounts.find((a) => a.id === actualAccountId);
+
+  // ── Account recommender ──────────────────────────────────────────────────────
+  // Auto-select only when the backend is confident and the user hasn't chosen.
+  let applyingRec = false;
+  function applyAccountRec(rec) {
+    accountRec = rec || null;
+    if (rec?.auto_select && rec.recommended && !accountTouched) {
+      applyingRec = true;
+      actualAccountId = rec.recommended;
+      applyingRec = false;
+    }
+  }
+  function pickAccount(id) {
+    accountTouched = true;
+    actualAccountId = id;
+  }
+  // a manual change in the sidebar counts as the user's choice
+  $: if (actualAccountId && !applyingRec && accountRec && actualAccountId !== accountRec.recommended) accountTouched = true;
+
+  // connected to Actual after uploading → ask for a recommendation now
+  let recAskedFor = null; // statement object we already asked about (prevents a fetch loop)
+  $: if (actualBudgetLoaded && statementInfo && !accountRec?.suggestions?.length && recAskedFor !== statementInfo) refreshAccountRec();
+  let recLoading = false;
+  async function refreshAccountRec() {
+    if (recLoading) return;
+    recAskedFor = statementInfo;
+    recLoading = true;
+    try {
+      const res = await fetch(`${API}/accounts/recommend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ statement: statementInfo, transactions }),
+      });
+      if (res.ok) applyAccountRec(await res.json());
+    } catch {}
+    finally { recLoading = false; }
+  }
+
+  // after a successful import, remember "this card/account number → this Actual account"
+  async function rememberAccount() {
+    if (!statementInfo?.fingerprint || !actualAccountId) return;
+    try {
+      await fetch(`${API}/accounts/remember`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fingerprint: statementInfo.fingerprint,
+          account_id: actualAccountId,
+          account_name: destinationAccount?.name || "",
+        }),
+      });
+      if (accountRec) accountRec = { ...accountRec, remembered: actualAccountId };
+    } catch {}
+  }
   $: newCountEstimate = importable.length;
   function fmtAccountBalance(b) {
     if (b === null || b === undefined) return "";
@@ -499,7 +561,9 @@
       <div class="topbar-left">
         <span class="app-title">💳 Budget Parser</span>
         {#if detectedBank}
-          <span class="badge">{detectedBank}</span>
+          <span class="badge" title={statementInfo?.evidence?.join(" · ") ?? ""}
+            >{statementInfo?.label ?? detectedBank}</span
+          >
         {/if}
         {#if actualBudgetLoaded}
           <button
@@ -549,6 +613,8 @@
             on:click={() => {
               transactions = [];
               detectedBank = "";
+              statementInfo = null;
+              accountRec = null;
               importResult = null;
               dryRunResult = null;
             }}
@@ -677,6 +743,13 @@
               </button>
             </div>
           </div>
+
+          <AccountSuggestion
+            statement={statementInfo}
+            rec={accountRec}
+            selectedId={actualAccountId}
+            on:pick={(e) => pickAccount(e.detail)}
+          />
 
           {#if actualAccountId && destinationAccount}
             <div class="confirm-card">

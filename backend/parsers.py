@@ -170,9 +170,12 @@ def _std(
     ref=None,
     merchant: Optional[str] = None,
     legacy_ids: Optional[list] = None,
+    match_text: Optional[str] = None,
 ) -> dict:
-    """amount > 0 = money out (debit), amount < 0 = money in (credit)."""
-    cat = categorize(desc, is_credit=amount < 0, payee_hint=merchant)
+    """amount > 0 = money out (debit), amount < 0 = money in (credit).
+    match_text: what the categoriser should read when the description is a generic
+    wrapper (e.g. "PAYNOW-FAST OTHR … PIB… BREAD HAVEN" → "BREAD HAVEN")."""
+    cat = categorize(match_text or desc, is_credit=amount < 0, payee_hint=merchant)
     hash_id = _hash_id(date, desc, amount, currency)
     imported_id = f"ref-{ref}" if ref else hash_id
     legacy = [i for i in (legacy_ids or []) if i and i != imported_id]
@@ -182,6 +185,7 @@ def _std(
         "date": date,
         "description": desc,
         "merchant": merchant,
+        "match_text": match_text,
         "amount": abs(amount),
         "currency": currency,
         "is_credit": amount < 0,
@@ -205,6 +209,48 @@ def _std(
 # ── UOB ───────────────────────────────────────────────────────────────────────
 
 _UOB_REF = re.compile(r"Ref\s*No\.?\s*:?\s*([A-Za-z0-9]+)", re.I)
+
+
+# UOB savings/current ("One Account") rows are single-line wrappers around the
+# real counterparty. Pull out who it was and the bank reference (PIB…/MBK…).
+_BUSINESS = re.compile(
+    r"\b(pte|ltd|lt|llp|private|pay|payments|shop|store|foods?|medical|clinic|cafe|restaurant|"
+    r"kitchen|bakery|opticians?|mart|group|enterprise|trading|services|lta|qashier|stripe)\b|\.com\b|-",
+    re.I)
+_UOB_ACCT_PATTERNS = [
+    # PAYNOW-FAST OTHR <memo> PIB2609…  <recipient>
+    re.compile(r"^(?:PAYNOW-FAST|Funds Trf - FAST)\s+OTHR\s+(?P<memo>.*?)\s*(?P<ref>PIB\d{10,})\s+(?P<name>.+)$", re.I),
+    # PAYNOW-FAST [MX] <recipient> MBK2609…
+    re.compile(r"^PAYNOW-FAST\s+(?:MX\s+)?(?P<name>.+?)\s+(?P<ref>MBK\d{10,})$", re.I),
+    # NETS Debit-Consumer <merchant><terminal id> xxxxxx4421
+    re.compile(r"^NETS Debit-Consumer\s+(?P<name>.+?)\s*\d{6,}\s+x+\d{4}$", re.I),
+    # Misc DR-Debit Card MTY-FAVEPAY <merchant> 09 AUG 7250 0025994
+    re.compile(r"^Misc DR-Debit Card\s+(?:MTY-)?(?:FAVEPAY\s+)?(?P<name>.+?)\s+\d{2}\s+[A-Z]{3}\b", re.I),
+    # Inward Credit-FAST Transfer OTHR [Other] <sender>
+    re.compile(r"^Inward Credit-FAST\s+Transfer\s+OTHR\s+(?:Other\s+)?(?P<name>.+)$", re.I),
+    # Bill Payment Bill payment mBK-UCF 8028300107  (not card payments — those are transfers)
+    re.compile(r"^Bill Payment\s+Bill payment\s+mBK-(?P<name>\S+)", re.I),
+]
+
+
+def _uob_account_parts(desc: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """→ (counterparty, bank ref, text for the categoriser) for UOB account rows."""
+    for rx in _UOB_ACCT_PATTERNS:
+        m = rx.match(desc.strip())
+        if not m:
+            continue
+        name = re.sub(r"^(?:Qashier-|MTY-)", "", m.group("name").strip(), flags=re.I)
+        ref = m.groupdict().get("ref")
+        memo = (m.groupdict().get("memo") or "").strip()
+        # drop boilerplate / reference-code memos ("Transfer - Mobile", "NA", "QY0301…")
+        if re.fullmatch(r"(?:transfer(?:\s*-\s*(?:mobile|uen))?|na|other|othr)?", memo, re.I) \
+                or re.search(r"\d{6,}|[A-Za-z]+\d+[A-Za-z]+\d", memo):
+            memo = ""
+        if desc.upper().startswith(("PAYNOW", "FUNDS TRF")) and not _BUSINESS.search(m.group("name")):
+            # a person: keep it flagged as PayNow so it's reviewed, not guessed
+            return name, ref, f"PAYNOW {name} {memo}".strip()
+        return name, ref, f"{name} {memo}".strip()
+    return None, None, None
 
 
 def _uob_merchant(line1: str) -> Optional[str]:
@@ -280,6 +326,11 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
             m = _UOB_REF.search(raw_desc)
             ref = m.group(1) if m else None
         line1 = raw_desc.split("\n")[0]   # un-collapsed: the merchant column is fixed-width
+        merchant, match_text = _uob_merchant(line1), None
+        if new_format:   # savings/current account export
+            acct_name, acct_ref, match_text = _uob_account_parts(_clean_desc(description))
+            merchant = acct_name or merchant
+            ref = ref or acct_ref
         txns.append(
             _std(
                 date_str,
@@ -289,7 +340,8 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
                 foreign_amount,
                 foreign_currency,
                 ref=ref,
-                merchant=_uob_merchant(line1),
+                merchant=merchant,
+                match_text=match_text,
             )
         )
     return txns
@@ -893,6 +945,23 @@ def pdf_text(content: bytes) -> str:
 
 
 def parse_bytes(content: bytes, filename: str = "") -> tuple[list[dict], str]:
+    txns, bank, _ = parse_statement(content, filename)
+    return txns, bank
+
+
+def parse_statement(content: bytes, filename: str = ""):
+    """→ (transactions, bank, StatementInfo) — info says card vs savings, last 4 digits, balance."""
+    from accounts import extract_statement_info
     if sniff_format(content, filename) == "pdf":
-        return detect_and_parse_pdf(pdf_text(content), hint=filename)
-    return detect_and_parse(load_table(content, filename), hint=filename)
+        text = pdf_text(content)
+        txns, label = detect_and_parse_pdf(text, hint=filename)
+        bank = label.split()[0] if label else "UOB"
+        info = extract_statement_info(None, bank, filename, txns, pdf_label=label)
+        m = re.search(r"(?:Account|Card)\s+(?:No\.?|Number)\s*:?\s*([\d\s-]{8,})", text, re.I)
+        if m:
+            digits = re.sub(r"\D", "", m.group(1))
+            info.last4 = digits[-4:]
+        return txns, bank, info
+    df = load_table(content, filename)
+    txns, bank = detect_and_parse(df, hint=filename)
+    return txns, bank, extract_statement_info(df, bank, filename, txns)

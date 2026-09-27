@@ -372,6 +372,36 @@ app.post('/rules/apply', async (req, res) => {
   }
 });
 
+// Which accounts already contain some of these transactions? Used by the
+// backend's account recommender. Body: { ids: [imported ids], startDate, endDate }
+app.post('/accounts/match', async (req, res) => {
+  if (!requireBudget(res)) return;
+  const { ids = [], startDate, endDate } = req.body || {};
+  const idSet = new Set(ids);
+  const pad = (iso, days) => {
+    const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+  try {
+    const accounts = await api.getAccounts();
+    const out = [];
+    for (const a of accounts) {
+      if (a.closed) continue;
+      let matchedIds = [];
+      if (idSet.size && startDate && endDate) {
+        const txns = await api.getTransactions(a.id, pad(startDate, -7), pad(endDate, 7));
+        matchedIds = txns.map(t => t.imported_id).filter(id => id && idSet.has(id));
+      }
+      let balance = null;
+      try { balance = await api.getAccountBalance(a.id); } catch (_) {}
+      out.push({ id: a.id, name: a.name, offbudget: !!a.offbudget, closed: !!a.closed, balance, matchedIds });
+    }
+    res.json({ accounts: out });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e) });
+  }
+});
+
 app.post('/preview', async (req, res) => {
   if (!requireBudget(res)) return;
   const { accountId, startDate, endDate } = req.body;
