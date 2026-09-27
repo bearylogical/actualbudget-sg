@@ -17,7 +17,7 @@ Open **http://localhost:3000**
 ```
 browser → frontend (Nginx :3000)
               ↓ /api/*
-         backend (FastAPI :8000)   ← parses XLS, categorises, exports CSV
+         backend (FastAPI :8000)   ← parses XLS/PDF, categorises, exports CSV
               ↓ http://actual-bridge:3001
          actual-bridge (Node :3001) ← @actual-app/api ↔ Actual Server
 ```
