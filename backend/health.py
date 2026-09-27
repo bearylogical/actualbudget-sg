@@ -134,6 +134,18 @@ def check_llm(refresh: bool = False, llm: LLMCategorizer | None = None, now: flo
     return {**result, "cached": False, "checked_at": _iso(now)}
 
 
+def check_ghostfolio() -> dict:
+    import ghostfolio
+    if not ghostfolio.configured():
+        return {"status": "disabled", "detail": "GHOSTFOLIO_URL / GHOSTFOLIO_TOKEN not set"}
+    t0 = time.monotonic()
+    s = ghostfolio.summary()
+    ms = round((time.monotonic() - t0) * 1000)
+    if s.get("error"):
+        return {"status": "error", "latency_ms": ms, "detail": s["error"]}
+    return {"status": "ok", "latency_ms": ms}
+
+
 def overall(components: dict) -> str:
     critical = ("backend", "bridge")
     if any(components[c]["status"] == "error" for c in critical if c in components):
@@ -153,5 +165,6 @@ async def full_report(bridge_url: str, refresh_llm: bool = False) -> dict:
         "actual_server": server,
         "scheduler": check_scheduler(),
         "llm": await run_in_threadpool(check_llm, refresh_llm),
+        "ghostfolio": await run_in_threadpool(check_ghostfolio),
     }
     return {"status": overall(components), "checked_at": _iso(time.time()), "components": components}

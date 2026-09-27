@@ -44,6 +44,9 @@ services:
       ACTUAL_BRIDGE_URL: "http://actual-bridge:3001"
       DATA_DIR: "/data"
       # LLM_HEALTH_TTL: "600"       # seconds between real LLM test calls in /health
+      # Investments for the Money dashboard (Ghostfolio → Settings → Security token)
+      GHOSTFOLIO_URL: "${GHOSTFOLIO_URL:-}"
+      GHOSTFOLIO_TOKEN: "${GHOSTFOLIO_TOKEN:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"]
       interval: 30s
@@ -100,6 +103,22 @@ services:
       start_period: 60s
     depends_on:
       actual-bridge:
+        condition: service_healthy
+
+  # Optional: the budget-app MCP server over HTTP, for Claude clients that can't
+  # launch it locally. `docker compose --profile mcp up -d mcp`. Keep it private
+  # (localhost / Tailscale) — it can approve review items.
+  mcp:
+    profiles: ["mcp"]
+    build: ./mcp
+    container_name: budget-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      BUDGET_APP_URL: "http://backend:8000"
+    depends_on:
+      backend:
         condition: service_healthy
 
 volumes:

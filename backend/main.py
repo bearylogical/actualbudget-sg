@@ -542,3 +542,94 @@ async def reconcile_account(body: dict):
                                        body.get("balance"), body.get("as_of"), body.get("use_llm", True))
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
+
+
+# ── Money dashboard (Actual + Ghostfolio) ────────────────────────────────────
+import finance
+import ghostfolio
+
+
+def _card_account_ids() -> set[str]:
+    return {v["account_id"] for fp, v in acct.load_map().items() if "|credit_card|" in fp}
+
+
+@app.get("/finance/summary")
+async def finance_summary(months: int = 6):
+    try:
+        actual = await run_in_threadpool(bridge_client.call, "GET", f"/finance/summary?months={int(months)}")
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+    ghost = await run_in_threadpool(ghostfolio.summary)
+    return finance.compute(actual, ghost, _card_account_ids(), review.counts().get("pending", 0))
+
+
+@app.post("/finance/brief")
+async def finance_brief():
+    llm = LLMCategorizer()
+    if not llm.enabled:
+        raise HTTPException(400, "LLM is not configured (LLM_PROVIDER)")
+    summary = await finance_summary()
+    bullets = await run_in_threadpool(finance.brief, summary, llm)
+    return {"bullets": bullets, "model": llm.model}
+
+
+# ── Investments: IBKR → Ghostfolio (on demand, data read by Claude's IBKR connector) ──
+import ibkr_ghostfolio as ibgf
+
+
+def _ibkr_account(account_id: str | None) -> dict:
+    if account_id:
+        return {"id": account_id}
+    a = ghostfolio.find_broker_account()
+    if not a:
+        raise HTTPException(400, "No IBKR account found in Ghostfolio — create one (platform: Interactive Brokers) "
+                                 "or pass account_id")
+    return a
+
+
+@app.post("/investments/ibkr/preview")
+async def ibkr_preview(body: dict):
+    """{trades: [...], positions: [...], account_id?} — raw IBKR connector output. Writes nothing."""
+    def run():
+        a = _ibkr_account(body.get("account_id"))
+        mapped = ibgf.map_trades(body.get("trades") or [], body.get("positions") or [], a["id"])
+        new, dup = ibgf.already_imported(mapped["activities"], ghostfolio.orders(a["id"]))
+        check = ghostfolio.import_activities(new, dry_run=True) if new else {"activities": []}
+        problems = [x for x in check.get("activities", []) if x.get("error")]
+        current = ghostfolio.holdings(a["id"])
+        before = ibgf.compare_positions(body.get("positions") or [], current)
+        # what would still differ after importing `new` → candidates for opening lots
+        after = ibgf.compare_positions(body.get("positions") or [],
+                                       current + [{"symbol": x["symbol"], "quantity": x["quantity"] * (1 if x["type"] == "BUY" else -1)}
+                                                  for x in new])
+        first = min((x["date"][:10] for x in mapped["activities"]), default=_date.today().isoformat())
+        opening_date = (_date.fromisoformat(first) - _td(days=1)).isoformat()
+        return {"account": {"id": a["id"], "name": a.get("name")}, "new": new, "already_imported": len(dup),
+                "skipped": mapped["skipped"], "unmapped": mapped["unmapped"], "ghostfolio_check": problems,
+                "position_diff_before": before, "position_diff_after_import": after,
+                "suggested_opening_lots": ibgf.opening_lots(body.get("positions") or [], after, a["id"], opening_date)}
+    try:
+        return await run_in_threadpool(run)
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+
+
+@app.post("/investments/ibkr/import")
+async def ibkr_import(body: dict):
+    """{activities: [...from preview.new], positions?: [...]} — imports into Ghostfolio."""
+    acts = body.get("activities") or []
+    if not acts:
+        raise HTTPException(400, "nothing to import")
+    def run():
+        res = ghostfolio.import_activities(acts, dry_run=False)
+        acct_id = acts[0].get("accountId")
+        diff = ibgf.compare_positions(body.get("positions") or [], ghostfolio.holdings(acct_id)) if body.get("positions") else None
+        return {"imported": len(res.get("activities", acts)), "position_diff_after": diff}
+    try:
+        return await run_in_threadpool(run)
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")

@@ -8,7 +8,7 @@
   const API = '/api';
   const LABELS = {
     backend: 'Backend', bridge: 'Actual bridge', actual_server: 'Actual server',
-    scheduler: 'Scheduler', llm: 'LLM',
+    scheduler: 'Scheduler', llm: 'LLM', ghostfolio: 'Ghostfolio',
   };
   let report = null;
   let error = '';

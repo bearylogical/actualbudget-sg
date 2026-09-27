@@ -601,6 +601,7 @@
             >{statementInfo?.label ?? detectedBank}</span
           >
         {/if}
+        <a class="ghost icon-btn money-link" href="/money">💰 Money</a>
         {#if actualBudgetLoaded}
           <button class="ghost icon-btn" class:has-pending={reviewPending} on:click={() => (showReview = true)}
             title="Possible duplicates, unlinked transfers and reconciliation fixes waiting for you"
@@ -1518,6 +1519,7 @@
     color: var(--warn);
   }
   button.has-pending { color: var(--warn); }
+  .money-link { text-decoration: none; color: var(--text2); display: inline-flex; align-items: center; }
   .topbar :global(.icon-btn) { white-space: nowrap; }
   .topbar-left .badge { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .scan-note { margin: 6px 20px 0; font-size: 12px; color: var(--text2); }
