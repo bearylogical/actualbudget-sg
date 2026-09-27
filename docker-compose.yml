@@ -87,12 +87,13 @@ services:
       DATA_DIR: "/data"
       WATCH_DIR: "/watch"
       POLL_INTERVAL_SECONDS: "30"
-      # ACTUAL_SERVER_URL: "http://your-actual-server:5006"
-      # ACTUAL_PASSWORD: "your-password"
-      # ACTUAL_BUDGET_ID: "your-budget-groupId"
-      # Route each bank's file to its own account (name or id). Keys match the
-      # detected bank ("UOB", "DBS/POSB", "OCBC") or the file name.
-      # ACCOUNT_ROUTES: '{"uob": "UOB One Card", "posb": "POSB Savings"}'
+      # Actual connection: nothing to set here. Loading a budget in the web UI saves it
+      # to /data/scheduler-config.json, which the scheduler reads (Disconnect clears it).
+      # Accounts are routed by
+      # what you've imported in the UI (/data/account_map.json).
+      # Env overrides for a headless setup (the saved file wins if both exist):
+      # ACTUAL_SERVER_URL / ACTUAL_PASSWORD / ACTUAL_BUDGET_ID
+      # ACCOUNT_ROUTES: '{"uob 2583": "UOB One Card"}'   # only for never-imported accounts
       # ACTUAL_ACCOUNT_ID: "fallback-account-uuid"
       # SCHEDULER_USE_LLM: "true"
     healthcheck:

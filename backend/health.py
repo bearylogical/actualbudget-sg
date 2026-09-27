@@ -116,7 +116,7 @@ def check_scheduler(now: float | None = None) -> dict:
         out["detail"] = f"last file failed: {hb.get('last_error', '')}"[:240]
     elif hb.get("config_ok") is False:
         out["status"] = "degraded"
-        out["detail"] = "missing ACTUAL_SERVER_URL / ACTUAL_PASSWORD / ACTUAL_BUDGET_ID"
+        out["detail"] = "no Actual connection yet — load a budget once in the web UI"
     return out
 
 

@@ -54,13 +54,13 @@ Use **⬇ Export CSV** on the Transactions tab for a clean spreadsheet import to
 
 ## Configuration
 
-All config is via environment variables in `docker-compose.yml`.
+All config is via environment variables in `docker-compose.yml`. The Actual connection is not — it's saved when you load a budget in the UI (see *Scheduler*).
 
 | Variable | Default | Description |
 |---|---|---|
 | `ACTUAL_BRIDGE_URL` | `http://actual-bridge:3001` | Internal bridge URL (don't change unless networking) |
 | `DATA_DIR` | `/data` | Category aliases + LLM cache (shared volume) |
-| `ACCOUNT_ROUTES` | — | Scheduler: bank/file → Actual account name or id |
+| `ACCOUNT_ROUTES` | — | Scheduler fallback for accounts never imported in the UI |
 | `LLM_*` | off | See *LLM fallback* |
 | `REVIEW_LEARN_AFTER` | `2` | identical decisions before a pattern resolves itself |
 | `REIMPORT_DELETED` (bridge) | `false` | re-import transactions you deleted in Actual |
@@ -258,8 +258,14 @@ learned rules onto the clean payee), then **create rules**, then re-run the audi
 
 ## Scheduler
 
-Drop files into the `watch-dir` volume. Route each bank to its own account:
+Drop files into the `watch-dir` volume. No compose config needed:
 
-```yaml
-ACCOUNT_ROUTES: '{"uob": "UOB One Card", "posb": "POSB Savings"}'
-```
+- **Connection** — loading a budget in the web UI saves the server URL, password and
+  budget to `/data/scheduler-config.json` (shared volume, mode 0600). The scheduler reads
+  it every poll, and uses it to reload the bridge after a restart.
+  **Disconnect (✕) in the UI clears it**, which pauses scheduled imports.
+- **Accounts** — import each account once in the UI; the choice is remembered in
+  `/data/account_map.json` and the scheduler routes by it.
+
+`GET :8000/scheduler/connection` shows what the scheduler will use (passwords omitted).
+`ACTUAL_*` / `ACCOUNT_ROUTES` env vars still work as a fallback for headless setups.

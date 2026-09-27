@@ -90,7 +90,7 @@ def ensure_budget_loaded() -> bool:
     enc_pass   = get_cfg("ACTUAL_ENCRYPTION_PASSWORD")
 
     if not all([server_url, password, budget_id]):
-        log.warning("Missing Actual connection config — skipping import")
+        log.warning("No Actual connection yet — load a budget once in the web UI — skipping import")
         return False
 
     body = {"serverURL": server_url, "password": password, "budgetId": budget_id}
