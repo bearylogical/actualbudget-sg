@@ -633,3 +633,17 @@ async def ibkr_import(body: dict):
         raise HTTPException(400, str(e))
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+
+
+@app.get("/finance/week")
+async def finance_week(days: int = 7):
+    """Last N days of spending vs your usual week (previous 4 weeks)."""
+    today = _date.today()
+    start = (today - _td(days=days - 1 + 28)).isoformat()
+    try:
+        rows, accts = await run_in_threadpool(bridge_client.txns, start, today.isoformat())
+        ctx = await run_in_threadpool(bridge_client.call, "GET", "/context")
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+    names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
+    return finance.week(rows, names, today, days)
