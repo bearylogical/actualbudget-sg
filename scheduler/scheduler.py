@@ -19,7 +19,8 @@ from pathlib import Path
 import requests
 
 from actual_rules import ActualContext
-from parsers import parse_bytes, SUPPORTED_EXTENSIONS
+from parsers import parse_statement, SUPPORTED_EXTENSIONS
+import accounts as acct
 from pipeline import enrich
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -106,26 +107,61 @@ def fetch_context() -> tuple[ActualContext, dict]:
     return ActualContext.from_bridge(data), data
 
 
-def resolve_account(bank: str, filename: str, accounts: list[dict]) -> str:
-    routes_raw = get_cfg("ACCOUNT_ROUTES", "")
-    routes = routes_raw if isinstance(routes_raw, dict) else (json.loads(routes_raw) if routes_raw else {})
-    target = None
-    for haystack in (bank.lower(), filename.lower()):
-        for key, value in routes.items():
-            if key.lower() in haystack:
-                target = value
-                break
-        if target:
-            break
-    target = target or get_cfg("ACTUAL_ACCOUNT_ID")
-    if not target:
-        raise ValueError(f"No account for bank={bank} file={filename}: set ACCOUNT_ROUTES or ACTUAL_ACCOUNT_ID")
+def _find_account(target, accounts: list[dict]) -> dict | None:
     for a in accounts:
         if a.get("id") == target or a.get("name", "").strip().lower() == str(target).strip().lower():
-            if a.get("closed"):
-                raise ValueError(f"Account '{a['name']}' is closed")
-            return a["id"]
-    raise ValueError(f"Account '{target}' not found in Actual")
+            return a
+    return None
+
+
+def resolve_account(info, transactions: list[dict], filename: str,
+                    accounts: list[dict]) -> tuple[str, str]:
+    """
+    → (account_id, why). Order:
+      1. remembered — this card/account number was imported somewhere before (UI or scheduler)
+      2. ACCOUNT_ROUTES — keys matched against "bank kind account-type last4 filename",
+         e.g. {"2583": "UOB One Card", "uob deposit": "UOB One Account", "posb": "POSB"}
+      3. recommender — only if confident (see accounts.AUTO_MIN_SCORE / MARGIN)
+      4. ACTUAL_ACCOUNT_ID fallback
+    Never guesses between close candidates: better to land in error/ than the wrong account.
+    """
+    open_accounts = [a for a in accounts if not a.get("closed")]
+
+    remembered = acct.load_map().get(info.fingerprint, {}).get("account_id")
+    if remembered and _find_account(remembered, open_accounts):
+        return remembered, f"remembered for {info.label}"
+
+    routes_raw = get_cfg("ACCOUNT_ROUTES", "")
+    routes = routes_raw if isinstance(routes_raw, dict) else (json.loads(routes_raw) if routes_raw else {})
+    haystack = " ".join([info.bank, info.kind.replace("_", " "), info.kind, info.account_type,
+                         info.last4, filename]).lower()
+    # longest key first so "uob deposit" beats "uob"
+    for key in sorted(routes, key=len, reverse=True):
+        if all(part in haystack for part in key.lower().split()):
+            a = _find_account(routes[key], open_accounts)
+            if not a:
+                raise ValueError(f"ACCOUNT_ROUTES['{key}'] → '{routes[key]}' not found (or closed) in Actual")
+            return a["id"], f"ACCOUNT_ROUTES['{key}']"
+
+    try:
+        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
+        r.raise_for_status()
+        rows = r.json().get("accounts", [])
+        rec = acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
+        if rec["auto_select"]:
+            top = rec["suggestions"][0]
+            return top["account_id"], f"recommended ({'; '.join(top['reasons'])})"
+        if rec["suggestions"]:
+            log.info("  Recommender not confident: " + ", ".join(
+                f"{s['name']}={s['score']}" for s in rec["suggestions"][:3]))
+    except Exception as e:
+        log.warning(f"  Recommender unavailable: {e}")
+
+    fallback = get_cfg("ACTUAL_ACCOUNT_ID")
+    if fallback and _find_account(fallback, open_accounts):
+        return _find_account(fallback, open_accounts)["id"], "ACTUAL_ACCOUNT_ID fallback"
+    raise ValueError(f"Can't tell which account {info.label} ({filename}) belongs to — import it once "
+                     "in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")
 
 
 def import_transactions(account_id: str, transactions: list[dict]) -> dict:
@@ -153,14 +189,16 @@ def process_file(path: Path):
     log.info(f"Processing: {path.name}")
     STATE.update(last_file=path.name, last_run=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     try:
-        transactions, bank = parse_bytes(path.read_bytes(), path.name)
-        log.info(f"  Parsed {len(transactions)} transactions (bank: {bank})")
+        transactions, bank, info = parse_statement(path.read_bytes(), path.name)
+        log.info(f"  Parsed {len(transactions)} transactions — {info.label}")
 
         if not ensure_budget_loaded():
             raise RuntimeError("Could not load Actual budget — check connection config")
 
         ctx, raw = fetch_context()
-        account_id = resolve_account(bank, path.name, raw.get("accounts", []))
+        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []))
+        account_name = (_find_account(account_id, raw.get("accounts", [])) or {}).get("name", account_id)
+        log.info(f"  Account: {account_name} — {why}")
         use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true"
         enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm)
         s = enriched["stats"]
@@ -168,6 +206,7 @@ def process_file(path: Path):
                  f"transfer={s['transfer']} review={s['review']} unmapped={s['unmapped']}")
 
         result = import_transactions(account_id, enriched["transactions"])
+        acct.remember(info.fingerprint, account_id, account_name)
         log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
                  f"{result.get('skipped', 0)} skipped")
         if result.get("errors"):

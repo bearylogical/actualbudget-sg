@@ -69,6 +69,8 @@ def clean_description(raw: str) -> str:
     stem = re.sub(r"\s*@.*$|\s+-\s+.*$", "", s).strip(" -*.,:/")
     if len(stem) >= 3:
         s = stem
+    # truncated company suffixes: "KOUFU PTE L", "SHOPEEPAY PRIVATE L", "BREAD HAVEN PTE. LT"
+    s = re.sub(r"\s+(?:private|pte\.?)(?:\s+l\w{0,2}\.?)?$|\s+lt\.?$|\s+l$", "", s, flags=re.I).strip(" -*.,:/")
     # foreign merchants end with an ISO country code: "NINTENDO LU", "AMAZON.CO.UK GB"
     if len(s.split()) > 1:
         s = re.sub(r"\s+[A-Z]{2}$", "", s)

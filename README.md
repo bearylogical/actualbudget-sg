@@ -120,6 +120,28 @@ Only payee names and statement descriptions are sent — no account numbers or b
 The model must choose from your Actual categories; answers are cached per payee in
 `/data/llm_cache.json`, so each merchant is asked once.
 
+## Which account? (recommender)
+
+Every upload is identified from its header — bank, **credit card vs savings/current**, last 4
+digits, statement balance — e.g. `UOB Credit card •2583 (UOB ONE CARD)`,
+`UOB Savings / current •4421 (One Account)`, `DBS/POSB Savings / current •1343 (personal)`.
+Your open Actual accounts are then ranked by:
+
+1. **remembered** — you imported this card/account number into that account before
+2. **overlap** — some of these transactions already exist there
+3. **balance** — account balance equals the statement balance
+4. **name** — bank, product (“One Card”, “One Account”), POSB nickname, last 4, card-vs-savings words
+
+A confident pick is selected for you (with the reasons shown); otherwise you get one-click
+suggestions, and a warning if you pick an account that doesn't fit. After a successful
+import the choice is remembered in `/data/account_map.json` — the scheduler uses the same
+memory, so import each account once in the UI and scheduled imports route themselves.
+
+Scheduler order: remembered → `ACCOUNT_ROUTES` → confident recommendation →
+`ACTUAL_ACCOUNT_ID`; if none apply the file goes to `error/` rather than a wrong account.
+Route keys match words from the statement, e.g.
+`{"2583": "UOB One Card", "uob deposit": "UOB One Account", "posb": "POSB Savings"}`.
+
 ## Health checks
 
 The dot in the top bar summarises all services — click it for details and **Test now** for the LLM.
