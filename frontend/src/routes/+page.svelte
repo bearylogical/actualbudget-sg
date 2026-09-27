@@ -6,6 +6,8 @@
   import { onMount } from "svelte";
   import HealthStatus from "../components/HealthStatus.svelte";
   import AccountSuggestion from "../components/AccountSuggestion.svelte";
+  import ReviewQueue from "../components/ReviewQueue.svelte";
+  import ReconcilePanel from "../components/ReconcilePanel.svelte";
 
   const API = "/api";
 
@@ -59,6 +61,12 @@
   let statementInfo = null; // what the statement is: bank, card vs savings, last 4, balance
   let accountRec = null; // recommender result: { suggestions, recommended, auto_select }
   let accountTouched = false; // user picked an account themselves after this upload
+  let showReview = false; // review queue modal
+  let reviewPending = 0; // items waiting for approval
+  async function refreshReviewCount() {
+    try { reviewPending = (await (await fetch(`${API}/review/counts`)).json()).pending || 0; } catch {}
+  }
+  onMount(() => { refreshReviewCount(); const t = setInterval(refreshReviewCount, 60000); return () => clearInterval(t); });
   let importing = false;
   let importResult = null;
   let importError = "";
@@ -364,6 +372,7 @@
       importResult = data;
       confirmDestination = false;
       await rememberAccount();
+      await scanAfterImport();
       if (learnRules) await learnFromManualEdits();
     } catch (e) {
       importError = e.message;
@@ -446,6 +455,25 @@
     finally { recLoading = false; }
   }
 
+  // after an import: look for duplicates / unlinked transfers in the statement period
+  let scanNote = "";
+  async function scanAfterImport() {
+    const dates = importable.map((t) => t.date).sort();
+    if (!dates.length) return;
+    try {
+      const res = await fetch(`${API}/review/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start: dates[0], end: dates[dates.length - 1] }),
+      });
+      const d = await res.json();
+      if (res.ok) scanNote = d.queued || d.auto_applied
+        ? `${d.queued} item(s) to review${d.auto_applied ? `, ${d.auto_applied} transfer(s) linked from what you taught it` : ""}`
+        : "";
+    } catch {}
+    refreshReviewCount();
+  }
+
   // after a successful import, remember "this card/account number → this Actual account"
   async function rememberAccount() {
     if (!statementInfo?.fingerprint || !actualAccountId) return;
@@ -516,6 +544,14 @@
   }
 </script>
 
+{#if showReview}
+  <ReviewQueue
+    on:close={() => { showReview = false; refreshReviewCount(); }}
+    on:changed={refreshReviewCount}
+    on:counts={(e) => (reviewPending = e.detail.pending || 0)}
+  />
+{/if}
+
 <!-- Category Mapping Modal: seed categories with no match in Actual → pick one (saved as aliases) -->
 {#if showMapper}
   <CategoryMapper
@@ -566,6 +602,9 @@
           >
         {/if}
         {#if actualBudgetLoaded}
+          <button class="ghost icon-btn" class:has-pending={reviewPending} on:click={() => (showReview = true)}
+            title="Possible duplicates, unlinked transfers and reconciliation fixes waiting for you"
+            >🧾 Review{reviewPending ? ` (${reviewPending})` : ""}</button>
           <button
             class="ghost icon-btn"
             on:click={() => (showAudit = true)}
@@ -744,10 +783,23 @@
             </div>
           </div>
 
+          {#if importResult && actualAccountId && statementInfo}
+            <ReconcilePanel
+              accountId={actualAccountId}
+              accountName={destinationAccount?.name ?? ""}
+              statement={statementInfo}
+              {transactions}
+              on:queued={refreshReviewCount}
+              on:openReview={() => (showReview = true)}
+            />
+            {#if scanNote}<div class="scan-note">🧾 {scanNote} — <button class="linkish" on:click={() => (showReview = true)}>review</button></div>{/if}
+          {/if}
+
           <AccountSuggestion
             statement={statementInfo}
             rec={accountRec}
             selectedId={actualAccountId}
+            total={transactions.length}
             on:pick={(e) => pickAccount(e.detail)}
           />
 
@@ -821,7 +873,7 @@
                 class:resolved={!!verifications[t.imported_id]}
               >
                 <span class="verify-date">{t.date}</span>
-                <span class="verify-desc">{t.description}</span>
+                <span class="verify-desc">{t.description}{#if t.reason}<small class="verify-reason"> — {t.reason}</small>{/if}</span>
                 <span class="verify-amt"
                   >{t.currency} {t.amount.toFixed(2)}</span
                 >
@@ -1465,6 +1517,11 @@
   button.warn {
     color: var(--warn);
   }
+  button.has-pending { color: var(--warn); }
+  .topbar :global(.icon-btn) { white-space: nowrap; }
+  .topbar-left .badge { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scan-note { margin: 6px 20px 0; font-size: 12px; color: var(--text2); }
+  .linkish { background: none; border: none; color: var(--accent); padding: 0; cursor: pointer; font-size: 12px; }
 
   .amt {
     font-weight: 600;

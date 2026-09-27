@@ -219,14 +219,14 @@ class LLMCategorizer:
                 continue
         return {it["key"]: by_idx[n] for n, it in enumerate(batch) if n in by_idx}
 
-    def _openai(self, prompt: str) -> str:
+    def _openai(self, prompt: str, system: str = SYSTEM_PROMPT) -> str:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         body = {
             "model": self.model,
             "temperature": 0,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+            "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
         }
@@ -238,11 +238,11 @@ class LLMCategorizer:
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
 
-    def _anthropic(self, prompt: str) -> str:
+    def _anthropic(self, prompt: str, system: str = SYSTEM_PROMPT) -> str:
         headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
         body = {"model": self.model, "max_tokens": 4096, "temperature": 0,
-                "system": SYSTEM_PROMPT,
+                "system": system,
                 "messages": [{"role": "user", "content": prompt}]}
         with self._client() as c:
             r = c.post(f"{self.base_url}/v1/messages", json=body, headers=headers)
@@ -275,3 +275,75 @@ def _parse_json(text: str):
             except json.JSONDecodeError:
                 return None
     return None
+
+
+# ── generic helpers used by the review / reconciliation agents ────────────────
+
+def complete_json(llm: "LLMCategorizer", system: str, prompt: str):
+    """One JSON-mode completion with a custom system prompt → parsed dict (or None)."""
+    text = llm._anthropic(prompt, system) if llm.provider == "anthropic" else llm._openai(prompt, system)
+    return _parse_json(text)
+
+
+def run_tools(llm: "LLMCategorizer", system: str, user: str, tools: list[dict],
+              handlers: dict, max_steps: int = 8) -> dict:
+    """
+    Minimal tool-calling loop for OpenAI-compatible APIs (OpenAI, Gemini, Ollama, …)
+    and Anthropic. tools: [{"name", "description", "parameters": <JSON schema>}];
+    handlers: name → callable(**args) returning something JSON-serialisable.
+    Returns {"text": final answer, "calls": [{"tool", "args", "result"}]}.
+    """
+    calls: list[dict] = []
+
+    def call(name, args):
+        fn = handlers.get(name)
+        try:
+            result = fn(**(args or {})) if fn else {"error": f"unknown tool {name}"}
+        except Exception as e:  # tools report errors back to the model instead of crashing the loop
+            result = {"error": f"{type(e).__name__}: {e}"}
+        calls.append({"tool": name, "args": args, "result": result})
+        return json.dumps(result, default=str)[:20000]
+
+    with llm._client() as c:
+        if llm.provider == "anthropic":
+            headers = {"x-api-key": llm.api_key, "anthropic-version": "2023-06-01",
+                       "content-type": "application/json"}
+            msgs = [{"role": "user", "content": user}]
+            atools = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                      for t in tools]
+            for _ in range(max_steps):
+                r = c.post(f"{llm.base_url}/v1/messages", headers=headers, json={
+                    "model": llm.model, "max_tokens": 4096, "temperature": 0, "system": system,
+                    "tools": atools, "messages": msgs})
+                r.raise_for_status()
+                content = r.json().get("content", [])
+                uses = [b for b in content if b.get("type") == "tool_use"]
+                if not uses:
+                    return {"text": "".join(b.get("text", "") for b in content), "calls": calls}
+                msgs.append({"role": "assistant", "content": content})
+                msgs.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": u["id"], "content": call(u["name"], u.get("input"))}
+                    for u in uses]})
+        else:
+            headers = {"Content-Type": "application/json"}
+            if llm.api_key:
+                headers["Authorization"] = f"Bearer {llm.api_key}"
+            msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            otools = [{"type": "function", "function": t} for t in tools]
+            for _ in range(max_steps):
+                r = c.post(f"{llm.base_url}/chat/completions", headers=headers, json={
+                    "model": llm.model, "temperature": 0, "messages": msgs, "tools": otools})
+                r.raise_for_status()
+                msg = r.json()["choices"][0]["message"]
+                tcs = msg.get("tool_calls") or []
+                if not tcs:
+                    return {"text": msg.get("content") or "", "calls": calls}
+                msgs.append({"role": "assistant", "content": msg.get("content"), "tool_calls": tcs})
+                for tc in tcs:
+                    try:
+                        args = json.loads(tc["function"].get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    msgs.append({"role": "tool", "tool_call_id": tc["id"],
+                                 "content": call(tc["function"]["name"], args)})
+    return {"text": "(stopped after max tool steps)", "calls": calls}

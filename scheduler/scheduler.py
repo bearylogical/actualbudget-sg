@@ -22,6 +22,10 @@ from actual_rules import ActualContext
 from parsers import parse_statement, SUPPORTED_EXTENSIONS
 import accounts as acct
 from pipeline import enrich
+import review
+import reconcile
+import bridge_client
+from llm import LLMCategorizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("scheduler")
@@ -114,8 +118,18 @@ def _find_account(target, accounts: list[dict]) -> dict | None:
     return None
 
 
+def fetch_matches(transactions: list[dict]) -> list[dict]:
+    try:
+        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
+        r.raise_for_status()
+        return r.json().get("accounts", [])
+    except Exception as e:
+        log.warning(f"  /accounts/match unavailable: {e}")
+        return []
+
+
 def resolve_account(info, transactions: list[dict], filename: str,
-                    accounts: list[dict]) -> tuple[str, str]:
+                    accounts: list[dict], rows: list[dict] | None = None) -> tuple[str, str]:
     """
     → (account_id, why). Order:
       1. remembered — this card/account number was imported somewhere before (UI or scheduler)
@@ -144,9 +158,7 @@ def resolve_account(info, transactions: list[dict], filename: str,
             return a["id"], f"ACCOUNT_ROUTES['{key}']"
 
     try:
-        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
-        r.raise_for_status()
-        rows = r.json().get("accounts", [])
+        rows = rows if rows is not None else fetch_matches(transactions)
         rec = acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
         if rec["auto_select"]:
             top = rec["suggestions"][0]
@@ -162,6 +174,46 @@ def resolve_account(info, transactions: list[dict], filename: str,
         return _find_account(fallback, open_accounts)["id"], "ACTUAL_ACCOUNT_ID fallback"
     raise ValueError(f"Can't tell which account {info.label} ({filename}) belongs to — import it once "
                      "in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")
+
+
+def post_import_checks(info, transactions: list[dict], account_id: str, account_name: str):
+    """Queue duplicates / transfers found in Actual, then reconcile against the statement.
+    Learned patterns (e.g. card payment → card account) are applied automatically;
+    everything else waits in the review queue."""
+    if not transactions:
+        return
+    dates = sorted(t["date"] for t in transactions)
+    try:
+        rows, _ = bridge_client.txns(dates[0], dates[-1])
+        auto = []
+        for d in review.find_existing_duplicates([r for r in rows if r["account"] == account_id]):
+            review.enqueue("existing_duplicate", {**d, "account": account_id}, [d["a"]["id"], d["b"]["id"]])
+        last4 = {v["account_id"]: fp.rsplit("|", 1)[-1] for fp, v in acct.load_map().items()}
+        for p in review.find_transfer_pairs(rows, last4):
+            it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
+            if it["status"] == "auto" and it.get("decision"):
+                auto.append(it)
+        for it in auto:
+            res = bridge_client.apply_actions(bridge_client.actions_for(it))
+            review.mark_done(it["id"], res, ok=res["ok"])
+        if auto:
+            log.info(f"  Linked {len(auto)} transfer(s) using learned patterns")
+
+        hist, accts = bridge_client.txns(reconcile.EPOCH, info.period_end or dates[-1], [account_id])
+        others = [r for r in rows if r["account"] != account_id]
+        rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others)
+        if rep["reconciled"]:
+            log.info(f"  Reconciled: Actual matches the bank balance")
+        else:
+            llm = LLMCategorizer()
+            use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true" and llm.enabled
+            queued = reconcile.agent(rep, transactions, llm)["queued"] if use_llm else reconcile.queue(rep)
+            gap = rep["gap"]
+            log.info(f"  Balance gap {gap/100 if gap is not None else '?'} — {len(queued)} fix(es) queued for review")
+        counts = review.counts()
+        STATE.update(review_pending=counts.get("pending", 0))
+    except Exception as e:
+        log.warning(f"  Post-import checks skipped: {e}")
 
 
 def import_transactions(account_id: str, transactions: list[dict]) -> dict:
@@ -196,9 +248,15 @@ def process_file(path: Path):
             raise RuntimeError("Could not load Actual budget — check connection config")
 
         ctx, raw = fetch_context()
-        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []))
+        rows = fetch_matches(transactions)
+        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []), rows)
         account_name = (_find_account(account_id, raw.get("accounts", [])) or {}).get("name", account_id)
         log.info(f"  Account: {account_name} — {why}")
+        conflict = acct.cross_account_conflict(
+            account_id, transactions, acct.match_counts(transactions, rows),
+            {a["id"]: a.get("name", a["id"]) for a in raw.get("accounts", [])})
+        if conflict:
+            raise ValueError(f"Refusing to import into '{account_name}': {conflict}")
         use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true"
         enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm)
         s = enriched["stats"]
@@ -209,6 +267,17 @@ def process_file(path: Path):
         acct.remember(info.fingerprint, account_id, account_name)
         log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
                  f"{result.get('skipped', 0)} skipped")
+        # possible duplicates → review queue (nothing is imported until you approve)
+        by_desc = {(t["date"], t["description"], t["amount"]): t for t in enriched["transactions"]}
+        for u in result.get("unreviewed") or []:
+            row = by_desc.get((u["date"], u["description"], u["amount"]))
+            if row:
+                review.enqueue("import_duplicate", {"account": account_id, "account_name": account_name,
+                                                    "incoming": row, "reason": u.get("reason")},
+                               [account_id, row["imported_id"]])
+            log.warning(f"  Held for review (possible duplicate): {u['date']} {u['description'][:40]} "
+                        f"{u['amount']} — {u.get('reason', '')}")
+        post_import_checks(info, enriched["transactions"], account_id, account_name)
         if result.get("errors"):
             log.warning(f"  Import errors: {result['errors']}")
 

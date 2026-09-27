@@ -7,6 +7,7 @@
   export let statement = null;     // StatementInfo dict from the backend
   export let rec = null;           // { suggestions, recommended, auto_select, remembered }
   export let selectedId = '';
+  export let total = 0;            // transactions in this statement
 
   const dispatch = createEventDispatcher();
 
@@ -16,12 +17,22 @@
   $: onRecommended = recommended && selectedId === recommended;
   // confident recommendation but the user picked something else → warn
   $: mismatch = !!(rec?.auto_select && selectedId && selectedId !== recommended);
+  // the same transactions already live in another account → importing here duplicates them
+  $: holder = (rec?.suggestions || []).find(s =>
+    s.account_id !== selectedId && (s.matched || 0) >= Math.max(3, 0.2 * total));
+  $: conflict = !!(selectedId && holder && !(selected?.matched));
   $: alternatives = (rec?.suggestions || []).filter(s => s.account_id !== selectedId && s.score > 0).slice(0, 3);
   function money(v) { return v == null ? '' : v.toLocaleString('en-SG', { style: 'currency', currency: 'SGD' }); }
 </script>
 
 {#if statement}
-  <div class="acct-card" class:ok={onRecommended} class:warn={mismatch}>
+  <div class="acct-card" class:ok={onRecommended && !conflict} class:warn={mismatch || conflict}>
+    {#if conflict}
+      <div class="line"><strong>⛔ {holder.matched} of these {total} transactions are already in {holder.name}.
+        Importing into this account would duplicate them.</strong>
+        <button class="primary small" on:click={() => dispatch('pick', holder.account_id)}>Switch to {holder.name}</button>
+      </div>
+    {/if}
     <div class="line">
       <span class="k">Statement</span>
       <strong>{statement.label}</strong>

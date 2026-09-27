@@ -325,6 +325,8 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
         if not ref:
             m = _UOB_REF.search(raw_desc)
             ref = m.group(1) if m else None
+        posting = str(row.get("Posting Date", "")).strip() if "Posting Date" in data.columns else "x"
+        pending = posting in ("", "nan", "NaT", "None")
         line1 = raw_desc.split("\n")[0]   # un-collapsed: the merchant column is fixed-width
         merchant, match_text = _uob_merchant(line1), None
         if new_format:   # savings/current account export
@@ -344,6 +346,10 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
                 match_text=match_text,
             )
         )
+        txns[-1]["pending"] = pending
+        if new_format and "available balance" in cols_lower:
+            # bank's running balance after this row — lets reconciliation pinpoint the first bad day
+            txns[-1]["running_balance"] = _to_float(row.get(cols_lower["available balance"]))
     return txns
 
 
@@ -949,6 +955,39 @@ def parse_bytes(content: bytes, filename: str = "") -> tuple[list[dict], str]:
     return txns, bank
 
 
+SKIP_PENDING = os.getenv("SKIP_PENDING", "true").lower() == "true"
+
+
+def _finalise(txns: list[dict], info) -> list[dict]:
+    """
+    Duplicate-safety pass over one statement:
+      * pending card rows (no posting date, no bank ref yet) are dropped — when they
+        post they get a Ref No and sometimes a different amount (FX), which would
+        otherwise import them twice. They arrive with the next export.
+      * identical rows without a bank ref (two $1.80 kopi at the same stall on the
+        same day) get an occurrence suffix so each has its own stable id; the plain
+        hash stays a legacy id so earlier imports still match 1:1.
+    """
+    if SKIP_PENDING:
+        kept = [t for t in txns if not t.get("pending")]
+        info.skipped_pending = len(txns) - len(kept)
+        if info.skipped_pending:
+            info.evidence.append(f"{info.skipped_pending} pending (unposted) rows skipped until they post")
+        txns = kept
+    seen: dict[str, int] = {}
+    for t in txns:
+        base = t["imported_id"]
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        if n and not base.startswith("ref-"):
+            t["imported_id"] = f"{base}-{n}"
+            t["legacy_ids"] = [base] + [i for i in t.get("legacy_ids", []) if i != base]
+        elif n:   # a repeated bank ref would be a bank-side oddity; keep ids unique anyway
+            t["imported_id"] = f"{base}-{n}"
+            t["legacy_ids"] = [base] + t.get("legacy_ids", [])
+    return txns
+
+
 def parse_statement(content: bytes, filename: str = ""):
     """→ (transactions, bank, StatementInfo) — info says card vs savings, last 4 digits, balance."""
     from accounts import extract_statement_info
@@ -961,7 +1000,8 @@ def parse_statement(content: bytes, filename: str = ""):
         if m:
             digits = re.sub(r"\D", "", m.group(1))
             info.last4 = digits[-4:]
-        return txns, bank, info
+        return _finalise(txns, info), bank, info
     df = load_table(content, filename)
     txns, bank = detect_and_parse(df, hint=filename)
-    return txns, bank, extract_statement_info(df, bank, filename, txns)
+    info = extract_statement_info(df, bank, filename, txns)
+    return _finalise(txns, info), bank, info

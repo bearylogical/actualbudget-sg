@@ -56,6 +56,7 @@ class StatementInfo:
     period_end: str | None = None
     balance: float | None = None     # positive = money in the account; card: amount owed
     balance_is_owed: bool = False    # card statements print what you owe
+    skipped_pending: int = 0         # unposted card rows held back (see parsers._finalise)
     evidence: list[str] = field(default_factory=list)
 
     @property
@@ -230,6 +231,25 @@ def match_request(transactions: list[dict]) -> dict:
     return {"ids": ids, "startDate": dates[0] if dates else None, "endDate": dates[-1] if dates else None}
 
 
+def cross_account_conflict(target_id: str, transactions: list[dict],
+                           matches: dict[str, dict], names: dict[str, str] | None = None) -> str | None:
+    """
+    Importing into the wrong account is the one duplicate the per-account checks can't
+    see. If a meaningful share of these transactions already lives in ANOTHER account
+    and none in the target, return a warning.
+    """
+    names = names or {}
+    n = len(transactions)
+    if not n or (matches.get(target_id) or {}).get("matched", 0):
+        return None
+    for acc_id, m in matches.items():
+        k = m.get("matched", 0)
+        if acc_id != target_id and k >= max(3, 0.2 * n):
+            return (f"{k} of these {n} transactions are already in "
+                    f"'{names.get(acc_id, acc_id)}' — importing here would duplicate them")
+    return None
+
+
 # ── recommender ───────────────────────────────────────────────────────────────
 
 def _words(s: str) -> set[str]:
@@ -306,7 +326,7 @@ def recommend(info: StatementInfo, transactions: list[dict], accounts: list[dict
             score -= 0.1
 
         ranked.append({"account_id": a["id"], "name": a.get("name"), "score": round(score, 3),
-                       "reasons": reasons})
+                       "reasons": reasons, "matched": m})
 
     ranked.sort(key=lambda r: -r["score"])
     top = ranked[0] if ranked else None

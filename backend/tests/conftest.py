@@ -14,6 +14,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     import taxonomy, llm, accounts
     monkeypatch.setattr(taxonomy, "ALIASES_FILE", tmp_path / "category_aliases.json")
     monkeypatch.setattr(accounts, "MAP_FILE", tmp_path / "account_map.json")
+    import review
+    monkeypatch.setattr(review, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(review, "DB_FILE", tmp_path / "review.db")
     monkeypatch.setattr(llm, "CACHE_FILE", tmp_path / "llm_cache.json")
     monkeypatch.setenv("LLM_PROVIDER", "none")
     yield

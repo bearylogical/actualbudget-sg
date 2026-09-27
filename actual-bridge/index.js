@@ -4,6 +4,7 @@ import fs from 'fs';
 // @actual-app/api is pre-installed in the actualbudget/actual-server base image
 // Import path matches where it lives in that image
 import * as api from '@actual-app/api';
+import { classify } from './dedup.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -402,6 +403,115 @@ app.post('/accounts/match', async (req, res) => {
   }
 });
 
+// ── Review-queue support: read, delete, link ────────────────────────────────
+// All writes here are only ever called after a human approved them in the review UI.
+
+// Every transaction on open accounts in a date range, flattened for analysis.
+app.post('/txns/range', async (req, res) => {
+  if (!requireBudget(res)) return;
+  const { startDate, endDate, accountIds } = req.body || {};
+  if (!startDate || !endDate) return res.status(400).json({ error: 'startDate and endDate required' });
+  try {
+    const [accounts, payees] = await Promise.all([api.getAccounts(), api.getPayees()]);
+    const payeeById = new Map(payees.map(p => [p.id, p]));
+    const out = [];
+    for (const a of accounts) {
+      if (a.closed || (accountIds && !accountIds.includes(a.id))) continue;
+      for (const t of await api.getTransactions(a.id, startDate, endDate)) {
+        const p = payeeById.get(t.payee);
+        out.push({
+          id: t.id, account: a.id, account_name: a.name, offbudget: !!a.offbudget,
+          date: t.date, amount: t.amount, payee: p?.name ?? null, payee_id: t.payee ?? null,
+          payee_transfer_acct: p?.transfer_acct ?? null,
+          imported_payee: t.imported_payee ?? null, imported_id: t.imported_id ?? null,
+          category: t.category ?? null, transfer_id: t.transfer_id ?? null, notes: t.notes ?? null,
+          is_parent: !!t.is_parent, is_child: !!t.is_child, starting_balance_flag: !!t.starting_balance_flag,
+        });
+      }
+    }
+    res.json({ transactions: out, accounts: accounts.map(a => ({ id: a.id, name: a.name, offbudget: !!a.offbudget, closed: !!a.closed })) });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e) });
+  }
+});
+
+// Delete transactions (approved duplicates). Deleted rows stay deleted on re-import
+// because imports run with reimportDeleted=false.
+app.post('/txns/delete', (req, res) => serialised(async () => {
+  if (!requireBudget(res)) return;
+  const { ids = [] } = req.body || {};
+  const result = { deleted: 0, errors: [] };
+  for (const id of ids) {
+    try { await api.deleteTransaction(id); result.deleted++; }
+    catch (e) { result.errors.push(`${id}: ${errMsg(e)}`); }
+  }
+  await api.sync();
+  res.json({ ok: true, ...result });
+}));
+
+// Add plain transactions (approved reconciliation adjustments). No rules, no transfers.
+app.post('/txns/add', (req, res) => serialised(async () => {
+  if (!requireBudget(res)) return;
+  const { accountId, transactions = [] } = req.body || {};
+  if (!accountId || !transactions.length) return res.status(400).json({ error: 'accountId and transactions required' });
+  try {
+    const r = await api.addTransactions(accountId, transactions, { learnCategories: false, runTransfers: false });
+    await api.sync();
+    res.json({ ok: true, added: Array.isArray(r) ? r.length : transactions.length });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e) });
+  }
+}));
+
+// Turn two separately imported rows into one Actual transfer.
+// pairs: [{ keep_id, other_id }] — keep_id's account keeps its row; other_id is replaced
+// by the transfer counterpart Actual creates. The deleted original's imported_id stays
+// as a tombstone, so re-importing that statement doesn't bring it back.
+app.post('/transfers/link', (req, res) => serialised(async () => {
+  if (!requireBudget(res)) return;
+  const { pairs = [] } = req.body || {};
+  const result = { linked: 0, errors: [] };
+  try {
+    const payees = await api.getPayees();
+    const accounts = await api.getAccounts();
+    for (const { keep_id, other_id, keep_account, other_account, date } of pairs) {
+      try {
+        const window = [shift(date, -10), shift(date, 10)];
+        const keepTx = (await api.getTransactions(keep_account, ...window)).find(t => t.id === keep_id);
+        const otherTx = (await api.getTransactions(other_account, ...window)).find(t => t.id === other_id);
+        if (!keepTx || !otherTx) throw new Error('transaction not found (already changed?)');
+        if (keepTx.transfer_id || otherTx.transfer_id) throw new Error('already a transfer');
+        if (keepTx.amount !== -otherTx.amount) throw new Error('amounts are not equal and opposite');
+        const transferPayee = payees.find(p => p.transfer_acct === other_account);
+        if (!transferPayee) throw new Error(`no transfer payee for account ${other_account}`);
+        const onBudget = a => !accounts.find(x => x.id === a)?.offbudget;
+        await api.deleteTransaction(other_id);
+        // a transfer between two on-budget accounts carries no category
+        await api.updateTransaction(keep_id, {
+          payee: transferPayee.id,
+          ...(onBudget(keep_account) && onBudget(other_account) ? { category: null } : {}),
+        });
+        await api.sync();
+        // carry the bank reference over to the counterpart when Actual has created it
+        const cp = (await api.getTransactions(other_account, ...window)).find(t => t.transfer_id === keep_id);
+        if (cp) await api.updateTransaction(cp.id, { cleared: true, notes: otherTx.notes || cp.notes || null });
+        result.linked++;
+      } catch (e) {
+        result.errors.push(`${keep_id} ↔ ${other_id}: ${errMsg(e)}`);
+      }
+    }
+    await api.sync();
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e), ...result });
+  }
+}));
+
+function shift(iso, days) {
+  const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 app.post('/preview', async (req, res) => {
   if (!requireBudget(res)) return;
   const { accountId, startDate, endDate } = req.body;
@@ -452,9 +562,22 @@ function buildActualTxn(t, payeeByName) {
   return txn;
 }
 
-app.post('/import', async (req, res) => {
+// One import at a time: the scheduler and the UI share this bridge, and two
+// concurrent imports of the same file could both pass the duplicate check.
+let importQueue = Promise.resolve();
+function serialised(fn) {
+  const run = importQueue.then(fn, fn);
+  importQueue = run.catch(() => {});
+  return run;
+}
+// Deleted in Actual = stays deleted on re-import (Actual's default re-imports them).
+const REIMPORT_DELETED = (process.env.REIMPORT_DELETED || 'false').toLowerCase() === 'true';
+
+app.post('/import', (req, res) => serialised(() => importHandler(req, res)));
+
+async function importHandler(req, res) {
   if (!requireBudget(res)) return;
-  const { accountId, transactions, dryRun = false, verified = {} } = req.body;
+  const { accountId, transactions, dryRun = false, verified = {}, reimportDeleted } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
     return res.status(400).json({ error: 'accountId and transactions[] required' });
   }
@@ -473,30 +596,7 @@ app.post('/import', async (req, res) => {
       shiftDate(dates[0], -7),
       shiftDate(dates[dates.length - 1], 7),
     );
-    const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
-
-    // Classify into three buckets
-    const clearlyNew = [];
-    const clearlyDup = [];
-    const needsVerify = [];
-
-    for (const t of transactions) {
-      const hasRef = t.imported_id && t.imported_id.startsWith('ref-');
-      const legacyIds = Array.isArray(t.legacy_ids)
-        ? t.legacy_ids
-        : (t.legacy_id ? [t.legacy_id] : []);
-      const idMatch =
-        existingIds.has(t.imported_id) ||
-        legacyIds.some(id => id && existingIds.has(id));
-
-      if (!idMatch) {
-        clearlyNew.push(t);
-      } else if (hasRef) {
-        clearlyDup.push(t);   // bank-assigned ref confirms it's a duplicate
-      } else {
-        needsVerify.push(t);  // hash collision — may be a legitimate second transaction
-      }
-    }
+    const { clearlyNew, clearlyDup, needsVerify } = classify(transactions, existing);
 
     if (dryRun) {
       // Pure read-only preview — do not touch the budget
@@ -521,7 +621,11 @@ app.post('/import', async (req, res) => {
 
     // Payees are already cleaned by the backend ("GrabFood", "SP Group", "AWS");
     // stop Actual from title-casing them into "Grabfood" / "Sp Group" / "Aws".
-    const result = await api.importTransactions(accountId, actualTxns, { payeeNameNormalization: 'original' });
+    const result = await api.importTransactions(accountId, actualTxns, {
+      payeeNameNormalization: 'original',
+      // an explicitly approved "import this missing row" may restore a deleted one
+      reimportDeleted: typeof reimportDeleted === 'boolean' ? reimportDeleted : REIMPORT_DELETED,
+    });
     await api.sync();
 
     const skipped = clearlyDup.length + needsVerify.filter(t => verified[t.imported_id] !== 'import').length;
@@ -531,12 +635,14 @@ app.post('/import', async (req, res) => {
       added: result.added?.length ?? 0,
       updated: result.updated?.length ?? 0,
       skipped,
+      unreviewed: needsVerify.filter(t => verified[t.imported_id] !== 'import')
+        .map(t => ({ date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
       errors: result.errors ?? [],
     });
   } catch (e) {
     res.status(500).json({ error: errMsg(e) });
   }
-});
+}
 
 app.post('/reset', async (_, res) => {
   try { await api.shutdown(); } catch (_) {}
