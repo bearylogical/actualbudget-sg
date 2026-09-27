@@ -582,7 +582,7 @@
               <p class="drop-sub">or click to browse</p>
               <div class="banks">
                 <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span
-                  >XLS / XLSX / CSV</span
+                  >XLS / XLSX / CSV / PDF</span
                 >
               </div>
             {/if}
@@ -590,7 +590,7 @@
           <input
             id="fi"
             type="file"
-            accept=".xls,.xlsx,.csv"
+            accept=".xls,.xlsx,.csv,.pdf"
             style="display:none"
             on:change={(e) => uploadFile(e.target.files[0])}
           />

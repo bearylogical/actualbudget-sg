@@ -29,6 +29,8 @@ XLSX_MAGIC = b"PK\x03\x04"
 
 
 def sniff_format(content: bytes, filename: str = "") -> str:
+    if content[:5] == b"%PDF-":
+        return "pdf"
     if content[:4] == XLS_MAGIC:
         return "xls"
     if content[:4] == XLSX_MAGIC:
@@ -88,7 +90,7 @@ def load_table(content: bytes, filename: str = "") -> pd.DataFrame:
     return _read_csv(content)
 
 
-SUPPORTED_EXTENSIONS = (".xls", ".xlsx", ".csv")
+SUPPORTED_EXTENSIONS = (".xls", ".xlsx", ".csv", ".pdf")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -102,6 +104,54 @@ def _clean_ref(raw) -> Optional[str]:
     """Return a non-empty, non-nan ref string or None."""
     val = str(raw).strip()
     return val if val and val not in ("nan", "NaT", "None", "") else None
+
+
+# UOB packs several lines into a single description cell rather than giving the
+# reference its own column: card rows carry the 23-digit acquirer reference
+# ("Ref No: 7412345…"), account rows a PayNow/bank reference ("PIB1234…").
+_REF_LABELLED = re.compile(r"^Ref No\.?\s*:\s*(\S+)$", re.IGNORECASE)
+_REF_BARE = re.compile(r"^(?:PIB|MBK)\d{10,}$", re.IGNORECASE)
+
+# Identifier-only lines that add nothing to a payee description.
+_DESC_NOISE = (
+    re.compile(r"^x{4,}\d+$", re.IGNORECASE),         # masked card number
+    re.compile(r"^\d{6,}$"),                          # bare account number
+    re.compile(r"^OTHR\s+\S{12,}$", re.IGNORECASE),   # opaque transfer code
+)
+
+
+def _desc_and_ref(raw) -> tuple[str, Optional[str]]:
+    """
+    Split a statement description into a readable payee and its reference.
+
+    The reference is the reliable de-duplication key and is the same value in
+    the .xls export and the PDF statement, so it is pulled out rather than
+    discarded. Identifier-only lines are dropped and what remains is joined,
+    which keeps the payee — often on a continuation line — available to the
+    categoriser instead of leaving it as a bare "PAYNOW-FAST".
+    """
+    ref = None
+    parts: list[str] = []
+    for line in str(raw).split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line or line.lower() in ("nan", "nat", "none"):
+            continue
+
+        labelled = _REF_LABELLED.match(line)
+        if labelled:
+            ref = ref or labelled.group(1)
+            continue
+        if _REF_BARE.match(line):
+            ref = ref or line.upper()
+            continue
+
+        if any(p.match(line) for p in _DESC_NOISE):
+            continue
+        line = re.sub(r"^OTHR\s+", "", line, flags=re.IGNORECASE)
+        if line and line not in parts:
+            parts.append(line)
+
+    return " - ".join(parts), _clean_ref(ref)
 
 
 def _hash_id(date: str, desc: str, amount: float, currency: str) -> str:
@@ -225,9 +275,11 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
         # Card exports put the bank reference on line 2: "…SG\nRef No: 7477…"
         ref = _clean_ref(row.get(ref_col)) if ref_col else None
         if not ref:
-            m = _UOB_REF.search(description)
+            ref = embedded_ref
+        if not ref:
+            m = _UOB_REF.search(raw_desc)
             ref = m.group(1) if m else None
-        line1 = description.split("\n")[0]
+        line1 = raw_desc.split("\n")[0]   # un-collapsed: the merchant column is fixed-width
         txns.append(
             _std(
                 date_str,
@@ -785,5 +837,62 @@ def detect_and_parse(df: pd.DataFrame, hint: str = "") -> tuple[list[dict], str]
     raise ValueError(f"Could not detect bank format. Tried: {'; '.join(errors)}")
 
 
+def detect_and_parse_pdf(text: str, hint: str = "") -> tuple[list[dict], str]:
+    """Detect the issuing bank of a PDF e-statement and parse it."""
+    normalised = _pdf_normalise(text)
+    haystack = f"{normalised}\n{hint}".lower()
+
+    if "united overseas bank" in haystack or "uob" in haystack:
+        # Account statements have a Withdrawals/Deposits table; card statements
+        # a Post/Trans date pair. Try the likelier one first, then fall back.
+        card = (parse_uob_pdf, "UOB Credit Card")
+        account = (parse_uob_account_pdf, "UOB Account")
+        order = [account, card] if _PDF_ACCT_HEADER.search(normalised) else [card, account]
+
+        errors = []
+        for parser, label in order:
+            try:
+                return parser(normalised), label
+            except ValueError as e:
+                errors.append(str(e))
+        raise ValueError(
+            f"Recognised a UOB PDF but could not read it ({'; '.join(errors)})."
+        )
+
+    raise ValueError(
+        "Could not detect the bank for this PDF. Supported PDF formats: "
+        "UOB credit card and UOB account statements."
+    )
+
+
+def pdf_text(content: bytes) -> str:
+    """Extract PDF text, preserving column layout so statement rows stay intact."""
+    from pypdf import PdfReader
+    try:
+        reader = PdfReader(io.BytesIO(content))
+    except Exception as e:
+        raise ValueError(f"Could not read PDF: {e}")
+    if reader.is_encrypted:
+        try:
+            unlocked = bool(reader.decrypt(""))
+        except Exception:
+            unlocked = False
+        if not unlocked:
+            raise ValueError("This PDF is password-protected. Please remove the password and re-upload.")
+    pages = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text(extraction_mode="layout") or "")
+        except Exception:
+            pages.append("")   # a page with no extractable text shouldn't sink the upload
+    text = "\n".join(pages)
+    if not text.strip():
+        raise ValueError("No text found in this PDF — it looks like a scan or an image. "
+                         "Only text-based statements can be parsed.")
+    return text
+
+
 def parse_bytes(content: bytes, filename: str = "") -> tuple[list[dict], str]:
+    if sniff_format(content, filename) == "pdf":
+        return detect_and_parse_pdf(pdf_text(content), hint=filename)
     return detect_and_parse(load_table(content, filename), hint=filename)
