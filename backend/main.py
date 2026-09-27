@@ -376,3 +376,169 @@ async def actual_import(body: dict):
 @app.post("/actual/reset")
 async def actual_reset():
     return await _bridge("POST", "/reset")
+
+
+# ── Review queue (duplicates / transfers / reconciliation fixes) ─────────────
+import review
+import reconcile
+import bridge_client
+from datetime import date as _date, timedelta as _td
+
+
+def _account_last4() -> dict[str, str]:
+    """account_id → last 4 digits, from remembered statement fingerprints."""
+    out = {}
+    for fp, v in acct.load_map().items():
+        last4 = fp.rsplit("|", 1)[-1]
+        if last4 and last4 != "?":
+            out[v["account_id"]] = last4
+    return out
+
+
+def _apply(item: dict) -> dict:
+    try:
+        actions = bridge_client.actions_for(item)
+        result = bridge_client.apply_actions(actions) if actions else {"ok": True, "results": [], "errors": []}
+        review.mark_done(item["id"], result, ok=result["ok"])
+        if result["ok"]:
+            result["superseded"] = review.supersede(bridge_client.touched_ids(actions), except_id=item["id"])
+    except Exception as e:
+        result = {"ok": False, "errors": [str(e)]}
+        review.mark_done(item["id"], result, ok=False)
+    return {**review.get(item["id"]), "applied": result}
+
+
+def scan_and_queue(start: str, end: str, account_ids: list[str] | None = None) -> dict:
+    """Find duplicates + unlinked transfers in Actual and queue them. Learned items apply themselves."""
+    rows, _ = bridge_client.txns(start, end)
+    if account_ids:
+        dup_rows = [t for t in rows if t["account"] in account_ids]
+    else:
+        dup_rows = rows
+    queued, auto = [], []
+    for d in review.find_existing_duplicates(dup_rows):
+        it = review.enqueue("existing_duplicate", {**d, "account": d["a"]["account"]}, [d["a"]["id"], d["b"]["id"]])
+        (auto if it["status"] == "auto" else queued).append(it)
+    for p in review.find_transfer_pairs(rows, _account_last4()):
+        if account_ids and not ({p["a"]["account"], p["b"]["account"]} & set(account_ids)):
+            continue
+        it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
+        (auto if it["status"] == "auto" else queued).append(it)
+    applied = [_apply(it) for it in auto if it.get("decision")]
+    return {"queued": len([q for q in queued if q["status"] == "pending"]), "auto_applied": len(applied),
+            "items": queued + applied}
+
+
+@app.get("/review")
+async def review_list(status: str = "pending", kind: str = ""):
+    return {"items": review.list_items(status or None, kind or None), "counts": review.counts()}
+
+
+@app.get("/review/counts")
+async def review_counts():
+    return review.counts()
+
+
+@app.post("/review/scan")
+async def review_scan(body: dict | None = None):
+    """{days: 90} or {start, end, account_ids}"""
+    body = body or {}
+    end = body.get("end") or _date.today().isoformat()
+    start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 90)))).isoformat()
+    try:
+        return await run_in_threadpool(scan_and_queue, start, end, body.get("account_ids"))
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post("/review/{item_id}/decide")
+async def review_decide(item_id: str, body: dict):
+    """Approve a decision; it is applied to Actual immediately and remembered."""
+    try:
+        item = review.decide(item_id, body.get("decision", ""), by="you")
+    except KeyError:
+        raise HTTPException(404, "no such item")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await run_in_threadpool(_apply, item)
+
+
+@app.post("/review/{item_id}/dismiss")
+async def review_dismiss(item_id: str):
+    review.dismiss(item_id)
+    return review.get(item_id)
+
+
+@app.post("/review/advise")
+async def review_advise(body: dict | None = None):
+    """Ask the LLM for a verdict on pending items (advisory only)."""
+    llm = LLMCategorizer()
+    if not llm.enabled:
+        raise HTTPException(400, "LLM is not configured (LLM_PROVIDER)")
+    ids = set((body or {}).get("ids") or [])
+    items = [i for i in review.list_items("pending") if (not ids or i["id"] in ids)
+             and i["kind"] != "reconcile_fix"][:40]
+    verdicts = await run_in_threadpool(review.advise, items, llm)
+    return {"advised": len(verdicts), "items": review.list_items("pending")}
+
+
+@app.post("/review/accept-ai")
+async def review_accept_ai(body: dict | None = None):
+    """Bulk-approve pending items whose AI verdict is at least min_confidence (default 0.8).
+    Deletions are never bulk-approved."""
+    min_conf = float((body or {}).get("min_confidence", 0.8))
+    done = []
+    for it in review.list_items("pending"):
+        d = review.suggested_decision(it)
+        conf = (it.get("llm") or {}).get("confidence", 0)
+        if not d or conf < min_conf or d.startswith("delete"):
+            continue
+        item = review.decide(it["id"], d, by="you")
+        done.append(await run_in_threadpool(_apply, item))
+    return {"applied": len(done), "items": done}
+
+
+@app.get("/review/memory")
+async def review_memory():
+    return {"memory": review.memory(), "learn_after": review.LEARN_AFTER}
+
+
+@app.post("/review/memory/forget")
+async def review_forget(body: dict):
+    review.forget(body.get("key", ""))
+    return {"memory": review.memory()}
+
+
+# ── Reconciliation ───────────────────────────────────────────────────────────
+
+def run_reconcile(account_id: str, info, statement_rows: list[dict], balance: float | None = None,
+                  as_of: str | None = None, use_llm: bool = True) -> dict:
+    as_of = as_of or info.period_end or max((t["date"] for t in statement_rows), default=_date.today().isoformat())
+    start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
+    rows, accts = bridge_client.txns(reconcile.EPOCH, as_of, [account_id])
+    others, _ = bridge_client.txns(start, as_of)
+    others = [t for t in others if t["account"] != account_id]
+    name = next((a["name"] for a in accts if a["id"] == account_id), account_id)
+    report = reconcile.analyse(account_id, info, statement_rows, rows, balance, as_of, name, others)
+    llm = LLMCategorizer()
+    if use_llm and llm.enabled and not report["reconciled"]:
+        try:
+            ag = reconcile.agent(report, statement_rows, llm)
+            return {"report": report, "explanation": ag["explanation"], "tool_calls": ag["tool_calls"],
+                    "queued": ag["queued"], "engine": "llm"}
+        except Exception as e:   # fall back to the deterministic plan
+            report["llm_error"] = str(e)[:300]
+    return {"report": report, "explanation": None, "queued": reconcile.queue(report), "engine": "rules"}
+
+
+@app.post("/reconcile")
+async def reconcile_account(body: dict):
+    """{account_id, statement?, transactions?, balance?, as_of?, use_llm?} → report + queued fixes."""
+    if not body.get("account_id"):
+        raise HTTPException(400, "account_id required")
+    info = acct.StatementInfo.from_dict(body.get("statement"))
+    try:
+        return await run_in_threadpool(run_reconcile, body["account_id"], info, body.get("transactions") or [],
+                                       body.get("balance"), body.get("as_of"), body.get("use_llm", True))
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))

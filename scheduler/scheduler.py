@@ -22,6 +22,10 @@ from actual_rules import ActualContext
 from parsers import parse_statement, SUPPORTED_EXTENSIONS
 import accounts as acct
 from pipeline import enrich
+import review
+import reconcile
+import bridge_client
+from llm import LLMCategorizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("scheduler")
@@ -172,6 +176,46 @@ def resolve_account(info, transactions: list[dict], filename: str,
                      "in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")
 
 
+def post_import_checks(info, transactions: list[dict], account_id: str, account_name: str):
+    """Queue duplicates / transfers found in Actual, then reconcile against the statement.
+    Learned patterns (e.g. card payment → card account) are applied automatically;
+    everything else waits in the review queue."""
+    if not transactions:
+        return
+    dates = sorted(t["date"] for t in transactions)
+    try:
+        rows, _ = bridge_client.txns(dates[0], dates[-1])
+        auto = []
+        for d in review.find_existing_duplicates([r for r in rows if r["account"] == account_id]):
+            review.enqueue("existing_duplicate", {**d, "account": account_id}, [d["a"]["id"], d["b"]["id"]])
+        last4 = {v["account_id"]: fp.rsplit("|", 1)[-1] for fp, v in acct.load_map().items()}
+        for p in review.find_transfer_pairs(rows, last4):
+            it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
+            if it["status"] == "auto" and it.get("decision"):
+                auto.append(it)
+        for it in auto:
+            res = bridge_client.apply_actions(bridge_client.actions_for(it))
+            review.mark_done(it["id"], res, ok=res["ok"])
+        if auto:
+            log.info(f"  Linked {len(auto)} transfer(s) using learned patterns")
+
+        hist, accts = bridge_client.txns(reconcile.EPOCH, info.period_end or dates[-1], [account_id])
+        others = [r for r in rows if r["account"] != account_id]
+        rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others)
+        if rep["reconciled"]:
+            log.info(f"  Reconciled: Actual matches the bank balance")
+        else:
+            llm = LLMCategorizer()
+            use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true" and llm.enabled
+            queued = reconcile.agent(rep, transactions, llm)["queued"] if use_llm else reconcile.queue(rep)
+            gap = rep["gap"]
+            log.info(f"  Balance gap {gap/100 if gap is not None else '?'} — {len(queued)} fix(es) queued for review")
+        counts = review.counts()
+        STATE.update(review_pending=counts.get("pending", 0))
+    except Exception as e:
+        log.warning(f"  Post-import checks skipped: {e}")
+
+
 def import_transactions(account_id: str, transactions: list[dict]) -> dict:
     rows = []
     for t in transactions:
@@ -223,9 +267,17 @@ def process_file(path: Path):
         acct.remember(info.fingerprint, account_id, account_name)
         log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
                  f"{result.get('skipped', 0)} skipped")
+        # possible duplicates → review queue (nothing is imported until you approve)
+        by_desc = {(t["date"], t["description"], t["amount"]): t for t in enriched["transactions"]}
         for u in result.get("unreviewed") or []:
-            log.warning(f"  Held back (possible duplicate, review in the UI): {u['date']} "
-                        f"{u['description'][:40]} {u['amount']} — {u.get('reason', '')}")
+            row = by_desc.get((u["date"], u["description"], u["amount"]))
+            if row:
+                review.enqueue("import_duplicate", {"account": account_id, "account_name": account_name,
+                                                    "incoming": row, "reason": u.get("reason")},
+                               [account_id, row["imported_id"]])
+            log.warning(f"  Held for review (possible duplicate): {u['date']} {u['description'][:40]} "
+                        f"{u['amount']} — {u.get('reason', '')}")
+        post_import_checks(info, enriched["transactions"], account_id, account_name)
         if result.get("errors"):
             log.warning(f"  Import errors: {result['errors']}")
 

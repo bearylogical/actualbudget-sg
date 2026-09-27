@@ -347,6 +347,9 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
             )
         )
         txns[-1]["pending"] = pending
+        if new_format and "available balance" in cols_lower:
+            # bank's running balance after this row — lets reconciliation pinpoint the first bad day
+            txns[-1]["running_balance"] = _to_float(row.get(cols_lower["available balance"]))
     return txns
 
 

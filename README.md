@@ -62,6 +62,9 @@ All config is via environment variables in `docker-compose.yml`.
 | `DATA_DIR` | `/data` | Category aliases + LLM cache (shared volume) |
 | `ACCOUNT_ROUTES` | — | Scheduler: bank/file → Actual account name or id |
 | `LLM_*` | off | See *LLM fallback* |
+| `REVIEW_LEARN_AFTER` | `2` | identical decisions before a pattern resolves itself |
+| `REIMPORT_DELETED` (bridge) | `false` | re-import transactions you deleted in Actual |
+| `SKIP_PENDING` | `true` | hold back unposted card rows |
 | `PORT` (bridge) | `3001` | Bridge listen port |
 
 The bridge caches budget data in a Docker volume (`actual-data`), so subsequent loads of the same budget are fast.
@@ -158,6 +161,38 @@ Route keys match words from the statement, e.g.
 Your edits (category, notes, payee) are never overwritten by a re-import. Verified against
 Actual's real import engine: re-import, overlapping export and "same rows under new ids"
 all add 0 rows (`actual-bridge: npm test`, `backend: pytest`).
+
+## Review queue & reconciliation
+
+Nothing that looks like a duplicate, a transfer, or a balance fix changes Actual until you
+approve it in **🧾 Review**:
+
+| Item | Found by | Your options |
+|---|---|---|
+| Possible duplicate at import | import (UI dry-run / scheduler) | skip · import |
+| Duplicate already in Actual | **Scan Actual** / after each import | delete one · keep both |
+| Unlinked transfer (card payment, own-account transfer) | scan — matched by the other account's number in the bank text | link as transfer · keep separate |
+| Reconciliation fix | **⚖ Reconcile** / scheduler after import | apply · reject |
+
+* **Ask AI** gives each item a verdict + reason using your configured LLM; **Accept AI ≥80%**
+  applies confident ones in bulk (deletions always need a click).
+* **Learning:** every decision is remembered. After 2 identical decisions for a pattern
+  (e.g. "UOB One Account → UOB One Card card payment") new items resolve themselves —
+  see *What it learned*, forget any pattern. Deletions and balance fixes are never automated.
+
+**⚖ Reconcile** compares Actual with the bank for the uploaded statement and explains the
+gap to the cent: missing rows, extra rows, duplicates, unlinked transfers, the day the
+running balance first diverges (UOB account exports), an exact subset solver, and — when
+Actual has no history before the statement — the opening balance. With an LLM configured
+an agent investigates using tools (`get_summary`, `list_missing`, `list_extra`,
+`list_duplicates`, `running_balance`, `transfer_candidates`, `solve_gap`, `propose_fix`)
+and explains in plain words; its proposals land in the review queue. Card exports only
+carry the *last statement's* balance, so enter today's owed amount for an exact card check.
+
+Verified end-to-end against a real Actual server with your UOB card, UOB One Account and
+POSB exports: 3 transfers linked, UOB One Account and POSB reconciled to the cent,
+re-imports after linking add nothing, a deleted row / hand-typed duplicate / PDF-style
+re-import are each caught and fixed through the queue.
 
 ## Health checks
 
