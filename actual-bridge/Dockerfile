@@ -10,7 +10,7 @@ COPY package.json .
 RUN npm install
 
 COPY polyfill.js .
-COPY index.js .
+COPY index.js dedup.js ./
 RUN mkdir -p /data/actual
 
 EXPOSE 3001

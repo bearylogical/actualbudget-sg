@@ -58,3 +58,31 @@ def test_posb_csv():
 def test_xls_named_csv_is_sniffed():
     assert sniff_format(b"\xd0\xcf\x11\xe0rest", "CC_TXN_History.csv") == "xls"
     assert sniff_format(b"PK\x03\x04rest", "x.csv") == "xlsx"
+
+
+def test_finalise_skips_pending_and_suffixes_identical_rows():
+    import accounts
+    from parsers import _finalise
+    rows = [
+        {"imported_id": "h", "legacy_ids": [], "pending": False},
+        {"imported_id": "h", "legacy_ids": [], "pending": False},
+        {"imported_id": "ref-9", "legacy_ids": ["x"], "pending": False},
+        {"imported_id": "p", "legacy_ids": [], "pending": True},
+    ]
+    info = accounts.StatementInfo(bank="UOB")
+    out = _finalise(rows, info)
+    assert [t["imported_id"] for t in out] == ["h", "h-1", "ref-9"]
+    assert out[1]["legacy_ids"] == ["h"]
+    assert info.skipped_pending == 1
+
+
+def test_uob_card_pending_rows_are_held_back():
+    from parsers import parse_statement
+    import io
+    df = uob_df()
+    df.iloc[3, 1] = None          # Shopee row: no posting date = pending
+    for i in (4, 5, 6):
+        df.iloc[i, 1] = "28 Sep 2026"
+    buf = io.BytesIO(); df.to_excel(buf, header=False, index=False)
+    tx, _, info = parse_statement(buf.getvalue(), "CC_TXN_History.xlsx")
+    assert info.skipped_pending == 1 and len(tx) == 3

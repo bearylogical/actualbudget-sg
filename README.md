@@ -142,6 +142,23 @@ Scheduler order: remembered → `ACCOUNT_ROUTES` → confident recommendation �
 Route keys match words from the statement, e.g.
 `{"2583": "UOB One Card", "uob deposit": "UOB One Account", "posb": "POSB Savings"}`.
 
+## Duplicate protection
+
+| Situation | What happens |
+|---|---|
+| Same file imported twice / overlapping exports | matched on the bank reference (UOB `Ref No`, `PIB…`/`MBK…`, POSB refs) or a content hash → skipped |
+| Two identical purchases the same day (2 × $1.80 kopi) | each gets its own id (`hash`, `hash-1`) → both kept, and re-imports pair up 1:1 |
+| Card rows not yet posted (no posting date) | held back until they post (`SKIP_PENDING=true`), since FX amounts can change |
+| Same transaction under a different id (PDF vs xls, old id scheme) | same date + amount already imported → **held for review**, never auto-added |
+| Transaction you deleted in Actual | stays deleted on re-import (`REIMPORT_DELETED=false`) |
+| Right file, wrong account | blocked: the UI shows ⛔ and the scheduler refuses when the transactions already live in another account |
+| UI and scheduler importing at once | imports are serialised in the bridge |
+| Hand-typed transactions in Actual | Actual links them to the imported row (same amount, ±7 days) instead of duplicating |
+
+Your edits (category, notes, payee) are never overwritten by a re-import. Verified against
+Actual's real import engine: re-import, overlapping export and "same rows under new ids"
+all add 0 rows (`actual-bridge: npm test`, `backend: pytest`).
+
 ## Health checks
 
 The dot in the top bar summarises all services — click it for details and **Test now** for the LLM.

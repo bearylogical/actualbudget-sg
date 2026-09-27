@@ -4,6 +4,7 @@ import fs from 'fs';
 // @actual-app/api is pre-installed in the actualbudget/actual-server base image
 // Import path matches where it lives in that image
 import * as api from '@actual-app/api';
+import { classify } from './dedup.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -452,7 +453,20 @@ function buildActualTxn(t, payeeByName) {
   return txn;
 }
 
-app.post('/import', async (req, res) => {
+// One import at a time: the scheduler and the UI share this bridge, and two
+// concurrent imports of the same file could both pass the duplicate check.
+let importQueue = Promise.resolve();
+function serialised(fn) {
+  const run = importQueue.then(fn, fn);
+  importQueue = run.catch(() => {});
+  return run;
+}
+// Deleted in Actual = stays deleted on re-import (Actual's default re-imports them).
+const REIMPORT_DELETED = (process.env.REIMPORT_DELETED || 'false').toLowerCase() === 'true';
+
+app.post('/import', (req, res) => serialised(() => importHandler(req, res)));
+
+async function importHandler(req, res) {
   if (!requireBudget(res)) return;
   const { accountId, transactions, dryRun = false, verified = {} } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
@@ -473,30 +487,7 @@ app.post('/import', async (req, res) => {
       shiftDate(dates[0], -7),
       shiftDate(dates[dates.length - 1], 7),
     );
-    const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
-
-    // Classify into three buckets
-    const clearlyNew = [];
-    const clearlyDup = [];
-    const needsVerify = [];
-
-    for (const t of transactions) {
-      const hasRef = t.imported_id && t.imported_id.startsWith('ref-');
-      const legacyIds = Array.isArray(t.legacy_ids)
-        ? t.legacy_ids
-        : (t.legacy_id ? [t.legacy_id] : []);
-      const idMatch =
-        existingIds.has(t.imported_id) ||
-        legacyIds.some(id => id && existingIds.has(id));
-
-      if (!idMatch) {
-        clearlyNew.push(t);
-      } else if (hasRef) {
-        clearlyDup.push(t);   // bank-assigned ref confirms it's a duplicate
-      } else {
-        needsVerify.push(t);  // hash collision — may be a legitimate second transaction
-      }
-    }
+    const { clearlyNew, clearlyDup, needsVerify } = classify(transactions, existing);
 
     if (dryRun) {
       // Pure read-only preview — do not touch the budget
@@ -521,7 +512,10 @@ app.post('/import', async (req, res) => {
 
     // Payees are already cleaned by the backend ("GrabFood", "SP Group", "AWS");
     // stop Actual from title-casing them into "Grabfood" / "Sp Group" / "Aws".
-    const result = await api.importTransactions(accountId, actualTxns, { payeeNameNormalization: 'original' });
+    const result = await api.importTransactions(accountId, actualTxns, {
+      payeeNameNormalization: 'original',
+      reimportDeleted: REIMPORT_DELETED,
+    });
     await api.sync();
 
     const skipped = clearlyDup.length + needsVerify.filter(t => verified[t.imported_id] !== 'import').length;
@@ -531,12 +525,14 @@ app.post('/import', async (req, res) => {
       added: result.added?.length ?? 0,
       updated: result.updated?.length ?? 0,
       skipped,
+      unreviewed: needsVerify.filter(t => verified[t.imported_id] !== 'import')
+        .map(t => ({ date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
       errors: result.errors ?? [],
     });
   } catch (e) {
     res.status(500).json({ error: errMsg(e) });
   }
-});
+}
 
 app.post('/reset', async (_, res) => {
   try { await api.shutdown(); } catch (_) {}

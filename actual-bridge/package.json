@@ -2,7 +2,10 @@
   "name": "actual-bridge",
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "@actual-app/api": "latest",
     "express": "^4.19.0"

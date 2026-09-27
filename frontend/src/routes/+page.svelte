@@ -748,6 +748,7 @@
             statement={statementInfo}
             rec={accountRec}
             selectedId={actualAccountId}
+            total={transactions.length}
             on:pick={(e) => pickAccount(e.detail)}
           />
 
@@ -821,7 +822,7 @@
                 class:resolved={!!verifications[t.imported_id]}
               >
                 <span class="verify-date">{t.date}</span>
-                <span class="verify-desc">{t.description}</span>
+                <span class="verify-desc">{t.description}{#if t.reason}<small class="verify-reason"> — {t.reason}</small>{/if}</span>
                 <span class="verify-amt"
                   >{t.currency} {t.amount.toFixed(2)}</span
                 >

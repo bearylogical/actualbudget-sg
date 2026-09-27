@@ -114,8 +114,18 @@ def _find_account(target, accounts: list[dict]) -> dict | None:
     return None
 
 
+def fetch_matches(transactions: list[dict]) -> list[dict]:
+    try:
+        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
+        r.raise_for_status()
+        return r.json().get("accounts", [])
+    except Exception as e:
+        log.warning(f"  /accounts/match unavailable: {e}")
+        return []
+
+
 def resolve_account(info, transactions: list[dict], filename: str,
-                    accounts: list[dict]) -> tuple[str, str]:
+                    accounts: list[dict], rows: list[dict] | None = None) -> tuple[str, str]:
     """
     → (account_id, why). Order:
       1. remembered — this card/account number was imported somewhere before (UI or scheduler)
@@ -144,9 +154,7 @@ def resolve_account(info, transactions: list[dict], filename: str,
             return a["id"], f"ACCOUNT_ROUTES['{key}']"
 
     try:
-        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
-        r.raise_for_status()
-        rows = r.json().get("accounts", [])
+        rows = rows if rows is not None else fetch_matches(transactions)
         rec = acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
         if rec["auto_select"]:
             top = rec["suggestions"][0]
@@ -196,9 +204,15 @@ def process_file(path: Path):
             raise RuntimeError("Could not load Actual budget — check connection config")
 
         ctx, raw = fetch_context()
-        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []))
+        rows = fetch_matches(transactions)
+        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []), rows)
         account_name = (_find_account(account_id, raw.get("accounts", [])) or {}).get("name", account_id)
         log.info(f"  Account: {account_name} — {why}")
+        conflict = acct.cross_account_conflict(
+            account_id, transactions, acct.match_counts(transactions, rows),
+            {a["id"]: a.get("name", a["id"]) for a in raw.get("accounts", [])})
+        if conflict:
+            raise ValueError(f"Refusing to import into '{account_name}': {conflict}")
         use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true"
         enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm)
         s = enriched["stats"]
@@ -209,6 +223,9 @@ def process_file(path: Path):
         acct.remember(info.fingerprint, account_id, account_name)
         log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
                  f"{result.get('skipped', 0)} skipped")
+        for u in result.get("unreviewed") or []:
+            log.warning(f"  Held back (possible duplicate, review in the UI): {u['date']} "
+                        f"{u['description'][:40]} {u['amount']} — {u.get('reason', '')}")
         if result.get("errors"):
             log.warning(f"  Import errors: {result['errors']}")
 
