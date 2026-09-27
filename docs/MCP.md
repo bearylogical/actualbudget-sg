@@ -76,6 +76,8 @@ Because the budget-app runs on your network, the run must happen *on your Mac*:
 * "Check UOB One Account against the bank — it shows 21,800.15" → `reconcile_account`
 * "Scan for duplicates and tell me what you'd do" → `review_scan`, `review_ask_ai`, `review_pending`
 * "Link the card payments" → `review_decide(item, "link")` after you confirm
+* "Fix my categories" → `category_scan` → `review_pending(kind="recategorize")` → you confirm
+  (all, some, or with a different category) → `review_decide(item, "apply" | "keep", category_id?)`
 * "Sync my IBKR into Ghostfolio" → IBKR connector `get_account_trades` (YEAR_TO_DATE) +
   `get_account_positions` → `ibkr_to_ghostfolio_preview` → you approve →
   `ibkr_to_ghostfolio_import`

@@ -77,8 +77,8 @@ def list_accounts() -> dict:
 
 @mcp.tool()
 def review_pending(kind: str = "") -> dict:
-    """Items waiting for approval: possible duplicates, unlinked transfers, reconciliation fixes.
-    kind: '' | import_duplicate | existing_duplicate | transfer_pair | reconcile_fix"""
+    """Items waiting for approval: possible duplicates, unlinked transfers, reconciliation fixes,
+    category fixes. kind: '' | import_duplicate | existing_duplicate | transfer_pair | reconcile_fix | recategorize"""
     return _req("GET", f"/review?status=pending&kind={kind}")
 
 
@@ -89,17 +89,37 @@ def review_scan(days: int = 120) -> dict:
 
 
 @write_tool()
+def category_scan(days: int = 120, mode: str = "uncategorised", use_llm: bool = True) -> dict:
+    """Propose categories for transactions already in Actual (last N days) and queue them as
+    'recategorize' review items. Changes nothing in Actual. mode='uncategorised' covers
+    uncategorised rows + rows your own Actual rules disagree with; mode='all' also flags rows
+    the merchant rules categorise differently. Then use review_pending(kind='recategorize')."""
+    return _req("POST", "/review/recategorize/scan", {"days": days, "mode": mode, "use_llm": use_llm})
+
+
+@mcp.tool()
+def list_categories() -> dict:
+    """Actual category groups and categories (ids for review_decide's category_id)."""
+    return _req("GET", "/actual/categories")
+
+
+@write_tool()
 def review_ask_ai() -> dict:
     """Have the configured LLM give a verdict + reason on each pending item (advisory only)."""
     return _req("POST", "/review/advise", {})
 
 
 @write_tool()
-def review_decide(item_id: str, decision: str) -> dict:
+def review_decide(item_id: str, decision: str, category_id: str = "") -> dict:
     """APPLY a decision to Actual. Only call after the user explicitly approved this item.
     Decisions: import_duplicate: skip|import · existing_duplicate: delete_a|delete_b|keep_both ·
-    transfer_pair: link|keep_separate · reconcile_fix: apply|reject. The decision is remembered."""
-    return _req("POST", f"/review/{item_id}/decide", {"decision": decision})
+    transfer_pair: link|keep_separate · reconcile_fix: apply|reject · recategorize: apply|keep.
+    For recategorize, category_id applies a different category than proposed (see list_categories).
+    The decision is remembered."""
+    body = {"decision": decision}
+    if category_id:
+        body["category_id"] = category_id
+    return _req("POST", f"/review/{item_id}/decide", body)
 
 
 @mcp.tool()

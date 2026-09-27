@@ -179,7 +179,7 @@ all add 0 rows (`actual-bridge: npm test`, `backend: pytest`).
 
 ## Review queue & reconciliation
 
-Nothing that looks like a duplicate, a transfer, or a balance fix changes Actual until you
+Nothing that looks like a duplicate, a transfer, a balance fix or a category fix changes Actual until you
 approve it in **🧾 Review**:
 
 | Item | Found by | Your options |
@@ -188,9 +188,15 @@ approve it in **🧾 Review**:
 | Duplicate already in Actual | **Scan Actual** / after each import | delete one · keep both |
 | Unlinked transfer (card payment, own-account transfer) | scan — matched by the other account's number in the bank text | link as transfer · keep separate |
 | Reconciliation fix | **⚖ Reconcile** / scheduler after import | apply · reject |
+| Category fix | **🏷 Fix categories** in Review / `category_scan` (MCP) | apply (or pick another) · keep |
 
-* **Ask AI** gives each item a verdict + reason using your configured LLM; **Accept AI ≥80%**
+* **Ask AI** gives each item a verdict + reason using your configured LLM; **Accept suggestions ≥80%**
   applies confident ones in bulk (deletions always need a click).
+* **🏷 Fix categories** runs the import pipeline (your Actual rules → merchant rules → LLM)
+  over the last 120 days already in Actual: uncategorised rows, plus rows one of your own
+  Actual rules categorises differently. The LLM only ever looks at uncategorised rows.
+  Transfers and splits are skipped; applying a fix also drops the `#review` tag. Learned
+  per payee → category.
 * **Learning:** every decision is remembered. After 2 identical decisions for a pattern
   (e.g. "UOB One Account → UOB One Card card payment") new items resolve themselves —
   see *What it learned*, forget any pattern. Deletions and balance fixes are never automated.
