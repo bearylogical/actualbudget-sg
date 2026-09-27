@@ -135,3 +135,23 @@ def test_uob_account_parts(desc, name, ref, kind):
     n, r, text = _uob_account_parts(desc)
     assert (n, r) == (name, ref)
     assert categorize(text, False)["kind"] == kind
+
+
+def test_connection_save_merges_and_hides_secrets(tmp_path, monkeypatch):
+    import json, os, stat
+    import connection
+    monkeypatch.setattr(connection, "CONFIG_FILE", tmp_path / "scheduler-config.json")
+    connection.CONFIG_FILE.write_text(json.dumps({"ACCOUNT_ROUTES": {"uob 2583": "UOB One Card"},
+                                                  "ACTUAL_ENCRYPTION_PASSWORD": "old"}))
+    connection.save({"serverURL": "http://actual:5006", "password": "pw", "budgetId": "sync-1"})
+    cfg = json.loads(connection.CONFIG_FILE.read_text())
+    assert cfg["ACTUAL_SERVER_URL"] == "http://actual:5006" and cfg["ACTUAL_BUDGET_ID"] == "sync-1"
+    assert cfg["ACCOUNT_ROUTES"] == {"uob 2583": "UOB One Card"}     # untouched
+    assert "ACTUAL_ENCRYPTION_PASSWORD" not in cfg                     # stale one dropped
+    assert stat.S_IMODE(os.stat(connection.CONFIG_FILE).st_mode) == 0o600
+    st = connection.status()
+    assert st["saved"] and "pw" not in json.dumps(st)
+    connection.clear()
+    cfg = json.loads(connection.CONFIG_FILE.read_text())
+    assert cfg == {"ACCOUNT_ROUTES": {"uob 2583": "UOB One Card"}}
+    assert not connection.status()["saved"]

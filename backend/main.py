@@ -14,6 +14,7 @@ from llm import LLMCategorizer
 from rules_audit import audit, to_markdown
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
+import connection
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -325,7 +326,19 @@ async def actual_list_budgets(body: dict):
 
 @app.post("/actual/budgets/load")
 async def actual_load_budget(body: dict):
-    return await _bridge("POST", "/budgets/load", body, timeout=60)
+    data = await _bridge("POST", "/budgets/load", body, timeout=60)
+    # Share this connection with the scheduler (see connection.py) so it needs no compose config
+    try:
+        connection.save(body)
+    except Exception as e:
+        print(f"[connection] could not save scheduler config: {e}")
+    return data
+
+
+@app.get("/scheduler/connection")
+async def scheduler_connection():
+    """What the scheduler will use (passwords omitted) + the account map it routes with."""
+    return {**connection.status(), "account_map": acct.load_map()}
 
 
 @app.get("/actual/accounts")
@@ -375,6 +388,11 @@ async def actual_import(body: dict):
 
 @app.post("/actual/reset")
 async def actual_reset():
+    """Disconnect: also forget the saved connection, so the scheduler stops importing."""
+    try:
+        connection.clear()
+    except Exception as e:
+        print(f"[connection] could not clear scheduler config: {e}")
     return await _bridge("POST", "/reset")
 
 

@@ -205,7 +205,7 @@
   <div class="sidebar-header">
     <span class="sidebar-logo">⚡ Actual</span>
     {#if connected}
-      <button class="ghost icon-btn" title="Disconnect" on:click={disconnect}>✕</button>
+      <button class="ghost icon-btn" title="Disconnect — also stops scheduled imports until you load a budget again" on:click={disconnect}>✕</button>
     {/if}
   </div>
 
