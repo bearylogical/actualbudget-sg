@@ -24,6 +24,12 @@ services:
       - actual-data:/data/actual
     environment:
       PORT: "3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   backend:
     build: ./backend
@@ -39,8 +45,16 @@ services:
       <<: *llm-env
       ACTUAL_BRIDGE_URL: "http://actual-bridge:3001"
       DATA_DIR: "/data"
+      # LLM_HEALTH_TTL: "600"       # seconds between real LLM test calls in /health
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
-      - actual-bridge
+      actual-bridge:
+        condition: service_healthy
 
   frontend:
     build: ./frontend
@@ -48,8 +62,14 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   scheduler:
     build:
@@ -74,8 +94,15 @@ services:
       # ACCOUNT_ROUTES: '{"uob": "UOB One Card", "posb": "POSB Savings"}'
       # ACTUAL_ACCOUNT_ID: "fallback-account-uuid"
       # SCHEDULER_USE_LLM: "true"
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
-      - actual-bridge
+      actual-bridge:
+        condition: service_healthy
 
 volumes:
   actual-data:

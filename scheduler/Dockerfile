@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Shared modules from backend — single source of truth
 COPY backend/*.py ./
 # Scheduler entrypoint
-COPY scheduler/scheduler.py .
+COPY scheduler/scheduler.py scheduler/healthcheck.py ./
 
 RUN mkdir -p /watch/done /watch/error /data
 

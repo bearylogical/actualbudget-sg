@@ -93,6 +93,37 @@ class LLMCategorizer:
                 "base_url": self.base_url if self.provider != "anthropic" else None,
                 "cached_payees": len(self.cache)}
 
+    # ── health ────────────────────────────────────────────────────────────────
+    def ping(self, timeout: float = 20.0) -> dict:
+        """Tiny real request to prove the endpoint, key and model all work."""
+        base = {"provider": self.provider, "model": self.model}
+        if not self.enabled:
+            reason = ("LLM_PROVIDER is none" if self.provider in ("", "none")
+                      else "missing LLM_MODEL / LLM_API_KEY / LLM_BASE_URL")
+            return {**base, "status": "disabled", "detail": reason}
+        prompt = 'Health check. Reply with exactly this JSON and nothing else: {"ok": true}'
+        saved, self.timeout = self.timeout, min(self.timeout, timeout)
+        t0 = time.monotonic()
+        try:
+            text = self._anthropic(prompt) if self.provider == "anthropic" else self._openai(prompt)
+            ms = round((time.monotonic() - t0) * 1000)
+            data = _parse_json(text)
+            if isinstance(data, dict):
+                return {**base, "status": "ok", "latency_ms": ms}
+            return {**base, "status": "degraded", "latency_ms": ms,
+                    "detail": f"model replied but not with JSON: {str(text)[:120]!r}"}
+        except httpx.HTTPStatusError as e:
+            body = e.response.text[:200].replace("\n", " ")
+            hint = {401: "bad API key", 403: "key not allowed / region", 404: "wrong model or base URL",
+                    429: "rate limited / quota"}.get(e.response.status_code, "")
+            return {**base, "status": "error", "latency_ms": round((time.monotonic() - t0) * 1000),
+                    "detail": f"HTTP {e.response.status_code}{' (' + hint + ')' if hint else ''}: {body}"}
+        except Exception as e:
+            return {**base, "status": "error", "latency_ms": round((time.monotonic() - t0) * 1000),
+                    "detail": f"{type(e).__name__}: {e}"[:240]}
+        finally:
+            self.timeout = saved
+
     # ── cache ─────────────────────────────────────────────────────────────────
     @property
     def cache(self) -> dict:

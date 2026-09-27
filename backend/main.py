@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 import pandas as pd
 import io
@@ -12,6 +12,7 @@ from pipeline import enrich
 from llm import LLMCategorizer
 from rules_audit import audit, to_markdown
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
+import health
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -81,6 +82,22 @@ def extract_pdf_text(file_bytes: bytes) -> str:
             "Only text-based statements can be parsed.",
         )
     return text
+
+
+# ── Health ───────────────────────────────────────────────────────────────────
+
+@app.get("/health/live")
+async def health_live():
+    """Process is up. Used by the Docker healthcheck — no dependencies checked."""
+    return {"ok": True}
+
+
+@app.get("/health")
+async def health_full(llm: str = "", strict: bool = False):
+    """All services. ?llm=refresh re-tests the LLM now; ?strict=1 returns 503 unless ok."""
+    report = await health.full_report(BRIDGE_URL, refresh_llm=(llm == "refresh"))
+    code = 503 if strict and report["status"] != "ok" else 200
+    return JSONResponse(report, status_code=code)
 
 
 @app.post("/parse")

@@ -65,7 +65,51 @@ function requireBudget(res) {
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+// ── Health ───────────────────────────────────────────────────────────────────
+// GET /health          cheap liveness (used by the Docker healthcheck)
+// GET /health?deep=1   also pings the Actual server and compares versions
+let apiVersion = null;
+try {
+  apiVersion = JSON.parse(fs.readFileSync(
+    new URL('./node_modules/@actual-app/api/package.json', import.meta.url), 'utf8')).version;
+} catch (_) {}
+const startedAt = new Date().toISOString();
+
+function majorMinor(v) {
+  const m = String(v || '').match(/^(\d+)\.(\d+)/);
+  return m ? `${m[1]}.${m[2]}` : null;
+}
+
+app.get('/health', async (req, res) => {
+  const out = {
+    ok: true,
+    service: 'actual-bridge',
+    startedAt,
+    apiVersion,
+    initialized: initializedForURL !== null,
+    budgetLoaded,
+    serverURL: initializedForURL,
+  };
+  if (req.query.deep && initializedForURL) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`${initializedForURL.replace(/\/$/, '')}/info`, { signal: AbortSignal.timeout(5000) });
+      const body = await r.json().catch(() => ({}));
+      const serverVersion = body?.build?.version ?? null;
+      out.actualServer = {
+        ok: r.ok,
+        status: r.status,
+        latencyMs: Date.now() - t0,
+        version: serverVersion,
+        // @actual-app/api must match the server release, or loads fail with out-of-sync-migrations
+        versionMatch: serverVersion && apiVersion ? majorMinor(serverVersion) === majorMinor(apiVersion) : null,
+      };
+    } catch (e) {
+      out.actualServer = { ok: false, latencyMs: Date.now() - t0, error: errMsg(e) };
+    }
+  }
+  res.json(out);
+});
 
 app.post('/budgets', async (req, res) => {
   const { serverURL, password } = req.body;

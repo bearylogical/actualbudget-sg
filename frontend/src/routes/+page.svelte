@@ -4,6 +4,7 @@
   import CategoryMapper from "../components/CategoryMapper.svelte";
   import RulesAudit from "../components/RulesAudit.svelte";
   import { onMount } from "svelte";
+  import HealthStatus from "../components/HealthStatus.svelte";
 
   const API = "/api";
 
@@ -556,6 +557,7 @@
           </button>
         </div>
       {/if}
+          <HealthStatus />
     </header>
 
     <div class="content">

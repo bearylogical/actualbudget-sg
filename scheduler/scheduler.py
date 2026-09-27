@@ -31,6 +31,27 @@ ERROR_DIR   = Path(os.getenv("ERROR_DIR", "/watch/error"))
 POLL_SECS   = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 BRIDGE_URL  = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 CONFIG_FILE = Path(os.getenv("CONFIG_FILE", "/data/scheduler-config.json"))
+HEARTBEAT   = Path(os.getenv("DATA_DIR", "/data")) / "scheduler-heartbeat.json"
+
+# last-run state, published in the heartbeat for the backend's /health
+STATE = {"last_file": None, "last_result": None, "last_error": None, "last_run": None}
+
+
+def write_heartbeat(pending: int):
+    """Atomically record that the loop is alive (read by backend /health and healthcheck.py)."""
+    data = {
+        "ts": time.time(), "pid": os.getpid(), "poll_secs": POLL_SECS, "watch_dir": str(WATCH_DIR),
+        "pending_files": pending,
+        "config_ok": all(get_cfg(k) for k in ("ACTUAL_SERVER_URL", "ACTUAL_PASSWORD", "ACTUAL_BUDGET_ID")),
+        **STATE,
+    }
+    try:
+        HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HEARTBEAT.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(HEARTBEAT)
+    except Exception as e:
+        log.warning(f"could not write heartbeat: {e}")
 
 
 def load_config() -> dict:
@@ -130,6 +151,7 @@ def already_processed(path: Path) -> bool:
 
 def process_file(path: Path):
     log.info(f"Processing: {path.name}")
+    STATE.update(last_file=path.name, last_run=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     try:
         transactions, bank = parse_bytes(path.read_bytes(), path.name)
         log.info(f"  Parsed {len(transactions)} transactions (bank: {bank})")
@@ -155,9 +177,12 @@ def process_file(path: Path):
         dest = DONE_DIR / f"{path.stem}_{int(time.time())}{path.suffix}"
         shutil.move(str(path), str(dest))
         log.info(f"  Moved to done: {dest.name}")
+        STATE.update(last_result="ok", last_error=None,
+                     last_counts={k: result.get(k, 0) for k in ("added", "updated", "skipped")})
 
     except Exception as e:
         log.error(f"  Error: {e}")
+        STATE.update(last_result="error", last_error=str(e)[:300])
         dest = ERROR_DIR / path.name
         try:
             shutil.move(str(path), str(dest))
@@ -170,11 +195,14 @@ def main():
     log.info(f"Scheduler watching {WATCH_DIR} every {POLL_SECS}s")
 
     while True:
-        for path in sorted(WATCH_DIR.iterdir()):
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS and not already_processed(path):
-                time.sleep(2)  # wait for file write to complete
-                if path.exists():
-                    process_file(path)
+        todo = [p for p in sorted(WATCH_DIR.iterdir())
+                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS and not already_processed(p)]
+        write_heartbeat(len(todo))
+        for path in todo:
+            time.sleep(2)  # wait for file write to complete
+            if path.exists():
+                process_file(path)
+                write_heartbeat(len(todo))
 
         time.sleep(POLL_SECS)
 

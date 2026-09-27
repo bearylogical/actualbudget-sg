@@ -120,6 +120,25 @@ Only payee names and statement descriptions are sent — no account numbers or b
 The model must choose from your Actual categories; answers are cached per payee in
 `/data/llm_cache.json`, so each merchant is asked once.
 
+## Health checks
+
+The dot in the top bar summarises all services — click it for details and **Test now** for the LLM.
+
+| Endpoint | Use |
+|---|---|
+| `GET :8000/health/live` | backend process up (Docker healthcheck) |
+| `GET :8000/health` | every service: backend, bridge, Actual server (+ version match), scheduler heartbeat, LLM |
+| `GET :8000/health?llm=refresh` | re-test the LLM now (otherwise cached for `LLM_HEALTH_TTL`, default 600 s) |
+| `GET :8000/health?strict=1` | HTTP 503 unless everything is `ok` — point Uptime Kuma here |
+| `GET :3000/healthz` | nginx up |
+
+Each container also has a Docker `healthcheck` (`docker compose ps` shows `healthy`), and
+services start in dependency order. The scheduler writes `/data/scheduler-heartbeat.json`
+every poll; it's reported `stale` if older than max(3 × poll interval, 5 min).
+
+Statuses: `ok` · `degraded` (working with a problem, e.g. Actual server/API version mismatch,
+last scheduler file failed) · `error` · `stale` · `disabled` · `unknown` (e.g. not connected yet).
+
 ## Rules audit & sync
 
 With a budget loaded, click **🧹 Rules audit**. It reports broken, duplicate and conflicting
