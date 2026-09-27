@@ -1,16 +1,101 @@
 """
 Multi-bank statement parsers for UOB, DBS/POSB, and OCBC.
 Each parser returns a list of standardised transaction dicts.
+
+Loading (xls / xlsx / csv, sniffed by content not extension) lives in
+`load_table()` so the web backend and the scheduler share one code path.
 """
-import re
+
+import csv
 import hashlib
+import io
+import os
+import re
+import subprocess
+import tempfile
 from typing import Optional
+
 import pandas as pd
-from categorizer import categorize_transaction   # top-level import
+
+from categorizer import categorize  # top-level import
+
+
+# ── loading ───────────────────────────────────────────────────────────────────
+
+XLS_MAGIC = (
+    b"\xd0\xcf\x11\xe0"  # OLE2 (legacy .xls) — UOB exports these, sometimes named .csv
+)
+XLSX_MAGIC = b"PK\x03\x04"
+
+
+def sniff_format(content: bytes, filename: str = "") -> str:
+    if content[:4] == XLS_MAGIC:
+        return "xls"
+    if content[:4] == XLSX_MAGIC:
+        return "xlsx"
+    head = content[:2048].lstrip(b"\xef\xbb\xbf").lower()
+    if b"<html" in head or b"<table" in head:
+        return "html"  # some banks' "xls" is really an HTML table
+    return "csv"
+
+
+def _read_xls(content: bytes) -> pd.DataFrame:
+    try:
+        return pd.read_excel(io.BytesIO(content), header=None, engine="xlrd")
+    except Exception:
+        # fallback: convert with LibreOffice
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.xls")
+            with open(src, "wb") as f:
+                f.write(content)
+            subprocess.run(
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "xlsx",
+                    src,
+                    "--outdir",
+                    d,
+                ],
+                capture_output=True,
+                check=True,
+            )
+            return pd.read_excel(os.path.join(d, "in.xlsx"), header=None)
+
+
+def _read_csv(content: bytes) -> pd.DataFrame:
+    text = None
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    rows = list(csv.reader(io.StringIO(text or "")))
+    width = max((len(r) for r in rows), default=0)
+    return pd.DataFrame([r + [""] * (width - len(r)) for r in rows])
+
+
+def load_table(content: bytes, filename: str = "") -> pd.DataFrame:
+    fmt = sniff_format(content, filename)
+    if fmt == "xls":
+        return _read_xls(content)
+    if fmt == "xlsx":
+        return pd.read_excel(io.BytesIO(content), header=None)
+    if fmt == "html":
+        return pd.read_html(io.BytesIO(content), header=None)[0]
+    return _read_csv(content)
+
+
+SUPPORTED_EXTENSIONS = (".xls", ".xlsx", ".csv")
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 
 def _clean_desc(raw) -> str:
-    return re.sub(r'\s+', ' ', str(raw).split("\n")[0].strip())
+    return re.sub(r"\s+", " ", str(raw).split("\n")[0].strip())
 
 
 def _clean_ref(raw) -> Optional[str]:
@@ -19,41 +104,82 @@ def _clean_ref(raw) -> Optional[str]:
     return val if val and val not in ("nan", "NaT", "None", "") else None
 
 
-def _std(date: str, desc: str, amount: float, currency: str = "SGD",
-         foreign_amount=None, foreign_currency=None, ref=None) -> dict:
-    category, confidence = categorize_transaction(desc)
-    if ref:
-        imported_id = f"ref-{ref}"
-    else:
-        imported_id = hashlib.sha256(f"{date}|{desc}|{amount:.2f}|{currency}".encode()).hexdigest()[:16]
+def _hash_id(date: str, desc: str, amount: float, currency: str) -> str:
+    return hashlib.sha256(
+        f"{date}|{desc}|{amount:.2f}|{currency}".encode()
+    ).hexdigest()[:16]
+
+
+def _std(
+    date: str,
+    desc: str,
+    amount: float,
+    currency: str = "SGD",
+    foreign_amount=None,
+    foreign_currency=None,
+    ref=None,
+    merchant: Optional[str] = None,
+    legacy_ids: Optional[list] = None,
+) -> dict:
+    """amount > 0 = money out (debit), amount < 0 = money in (credit)."""
+    cat = categorize(desc, is_credit=amount < 0, payee_hint=merchant)
+    hash_id = _hash_id(date, desc, amount, currency)
+    imported_id = f"ref-{ref}" if ref else hash_id
+    legacy = [i for i in (legacy_ids or []) if i and i != imported_id]
+    if ref and hash_id not in legacy:
+        legacy.append(hash_id)  # matches rows imported before refs were extracted
     return {
         "date": date,
         "description": desc,
+        "merchant": merchant,
         "amount": abs(amount),
         "currency": currency,
         "is_credit": amount < 0,
-        "category": category,
-        "confidence": confidence,
-        "foreign_amount": float(foreign_amount) if foreign_amount is not None and pd.notna(foreign_amount) else None,
-        "foreign_currency": foreign_currency if foreign_currency and str(foreign_currency) not in ("nan", "") else None,
+        "category": cat["category"],
+        "confidence": cat["confidence"],
+        "payee": cat["payee"],
+        "kind": cat["kind"],
+        "source": cat["source"],
+        "foreign_amount": float(foreign_amount)
+        if foreign_amount is not None and pd.notna(foreign_amount)
+        else None,
+        "foreign_currency": foreign_currency
+        if foreign_currency and str(foreign_currency) not in ("nan", "")
+        else None,
         "ref": ref,
         "imported_id": imported_id,
+        "legacy_ids": legacy,
     }
 
 
 # ── UOB ───────────────────────────────────────────────────────────────────────
 
+_UOB_REF = re.compile(r"Ref\s*No\.?\s*:?\s*([A-Za-z0-9]+)", re.I)
+
+
+def _uob_merchant(line1: str) -> Optional[str]:
+    """UOB card lines are fixed-width: 25-char merchant, city, country code."""
+    line1 = line1.rstrip()
+    if len(line1) >= 30 and re.search(r"\s[A-Z]{2,3}$", line1):
+        return line1[:25].strip() or None
+    return None
+
+
 def parse_uob(df: pd.DataFrame) -> list[dict]:
     header_row = next(
-        (i for i, row in df.iterrows() if any("Transaction Date" in str(v) for v in row.values)),
-        None
+        (
+            i
+            for i, row in df.iterrows()
+            if any("Transaction Date" in str(v) for v in row.values)
+        ),
+        None,
     )
     if header_row is None:
         raise ValueError("UOB: could not find transaction header row")
 
     df = df.copy()
     df.columns = df.iloc[header_row]
-    data = df.iloc[header_row + 1:].reset_index(drop=True)
+    data = df.iloc[header_row + 1 :].reset_index(drop=True)
 
     ref_col = next((c for c in data.columns if "ref" in str(c).lower()), None)
 
@@ -64,9 +190,12 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
     txns = []
     for _, row in data.iterrows():
         txn_date = str(row.get("Transaction Date", "")).strip()
-        description = str(row.get("Transaction Description", row.get("Description", ""))).strip()
+        raw_desc = str(
+            row.get("Transaction Description", row.get("Description", ""))
+        ).strip()
+        description, embedded_ref = _desc_and_ref(raw_desc)
 
-        if not txn_date or txn_date in ("nan", "NaT", "") or not description or description == "nan":
+        if not txn_date or txn_date in ("nan", "NaT", "") or not description:
             continue
 
         if new_format:
@@ -93,26 +222,149 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
         except Exception:
             continue
 
+        # Card exports put the bank reference on line 2: "…SG\nRef No: 7477…"
         ref = _clean_ref(row.get(ref_col)) if ref_col else None
-        txns.append(_std(date_str, _clean_desc(description), amount, currency, foreign_amount, foreign_currency, ref=ref))
+        if not ref:
+            m = _UOB_REF.search(description)
+            ref = m.group(1) if m else None
+        line1 = description.split("\n")[0]
+        txns.append(
+            _std(
+                date_str,
+                _clean_desc(description),
+                amount,
+                currency,
+                foreign_amount,
+                foreign_currency,
+                ref=ref,
+                merchant=_uob_merchant(line1),
+            )
+        )
     return txns
 
 
 # ── DBS / POSB ────────────────────────────────────────────────────────────────
 
+# Transaction codes in DBS/POSB CSV exports
+_DBS_CODE_HINT = {
+    "INT": "INTEREST CREDIT",
+    "SC": "SERVICE CHARGE",
+    "CDP": "CDP",
+}
+_DATE_SUFFIX = re.compile(r"\s+\d{2}[A-Z]{3}$")  # "… SGP 07AUG"
+
+
+def _dbs_merchant(code: str, r1: str, r2: str, r3: str) -> Optional[str]:
+    code = code.upper()
+    if code in ("MST", "POS", "NETS", "UMC", "VISA"):
+        return _DATE_SUFFIX.sub("", r1).strip() or None
+    m = re.match(r"^\s*(?:to|from)\s*:\s*(.+)$", r2, re.I)
+    if m:
+        return m.group(1).strip()
+    m = re.match(r"^\s*ib\s*:\s*(.+)$", r2, re.I)
+    if m:
+        return m.group(1).strip()
+    if code == "IBG" and r1:
+        return r1
+    return None
+
+
+def parse_dbs_v2(df: pd.DataFrame, header_row: int) -> list[dict]:
+    """Current digibank CSV: Transaction Date, Transaction Code, Description,
+    Transaction Ref1-3, Status, Debit Amount, Credit Amount."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.iloc[header_row]]
+    data = df.iloc[header_row + 1 :].reset_index(drop=True)
+    cols = {c.lower(): c for c in data.columns}
+
+    def g(row, name):
+        v = row.get(cols.get(name, ""), "")
+        return (
+            ""
+            if v is None or str(v).strip().lower() in ("nan", "none")
+            else str(v).strip()
+        )
+
+    txns = []
+    for _, row in data.iterrows():
+        raw_date = g(row, "transaction date")
+        if not raw_date:
+            continue
+        status = g(row, "status")
+        if status and status.lower() not in ("settled", "posted", "completed"):
+            continue  # pending rows re-appear with final details later
+        code = g(row, "transaction code")
+        desc_col = g(row, "description")
+        r1, r2, r3 = (
+            g(row, "transaction ref1"),
+            g(row, "transaction ref2"),
+            g(row, "transaction ref3"),
+        )
+        debit, credit = (
+            _to_float(g(row, "debit amount")),
+            _to_float(g(row, "credit amount")),
+        )
+        if debit is None and credit is None:
+            continue
+        amount = -(credit or 0) if credit else (debit or 0)
+        try:
+            date_str = _parse_date(raw_date)
+        except Exception:
+            continue
+
+        desc = re.sub(r"\s+", " ", desc_col).strip()
+        hint = _DBS_CODE_HINT.get(code.upper())
+        if hint and hint.lower() not in desc.lower():
+            desc = f"{hint} {desc}".strip()
+        if not desc:
+            desc = code or "UNKNOWN"
+
+        # refs: Ref1 alone isn't unique (card rows = merchant + date); use all three + code
+        ref_key = "|".join([code, r1, r2, r3])
+        ref = (
+            hashlib.sha1(ref_key.encode()).hexdigest()[:20]
+            if (r1 or r2 or r3)
+            else None
+        )
+        legacy = []
+        if r1:
+            legacy.append(f"ref-{r1}")  # old parser: Ref1 as ref
+        legacy.append(
+            _hash_id(date_str, _clean_desc(desc_col), amount, "SGD")
+        )  # old hash
+        txns.append(
+            _std(
+                date_str,
+                desc,
+                amount,
+                ref=ref,
+                merchant=_dbs_merchant(code, r1, r2, r3),
+                legacy_ids=legacy,
+            )
+        )
+    return txns
+
+
 def parse_dbs(df: pd.DataFrame) -> list[dict]:
     header_row = None
     for i, row in df.iterrows():
         vals = [str(v).strip().lower() for v in row.values]
-        if any("transaction date" in v or (v == "date" and "debit" in " ".join(vals)) for v in vals):
+        if any(
+            "transaction date" in v or (v == "date" and "debit" in " ".join(vals))
+            for v in vals
+        ):
             header_row = i
             break
     if header_row is None:
         raise ValueError("DBS: could not find transaction header row")
 
+    header_vals = [str(v).strip().lower() for v in df.iloc[header_row].values]
+    if "transaction ref1" in header_vals and "transaction code" in header_vals:
+        return parse_dbs_v2(df, header_row)
+
     df = df.copy()
     df.columns = [str(c).strip() for c in df.iloc[header_row]]
-    data = df.iloc[header_row + 1:].reset_index(drop=True)
+    data = df.iloc[header_row + 1 :].reset_index(drop=True)
 
     col_map: dict[str, str] = {}
     for col in data.columns:
@@ -123,7 +375,9 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
             col_map["debit"] = col
         elif "credit" in cl:
             col_map["credit"] = col
-        elif any(k in cl for k in ("description", "reference", "particulars", "narration")):
+        elif any(
+            k in cl for k in ("description", "reference", "particulars", "narration")
+        ):
             col_map.setdefault("desc", col)
         if "ref" in cl and col_map.get("desc") != col:
             col_map.setdefault("ref", col)
@@ -155,6 +409,7 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
 
 # ── OCBC ──────────────────────────────────────────────────────────────────────
 
+
 def parse_ocbc(df: pd.DataFrame) -> list[dict]:
     header_row = None
     for i, row in df.iterrows():
@@ -167,7 +422,7 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
 
     df = df.copy()
     df.columns = [str(c).strip() for c in df.iloc[header_row]]
-    data = df.iloc[header_row + 1:].reset_index(drop=True)
+    data = df.iloc[header_row + 1 :].reset_index(drop=True)
 
     col_map: dict[str, str] = {}
     for col in data.columns:
@@ -208,7 +463,269 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
     return txns
 
 
+# ── UOB PDF (credit card e-statement) ─────────────────────────────────────────
+
+_MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
+_AMOUNT = r"\d{1,3}(?:,\d{3})*\.\d{2}"
+
+# "07 MAY   03 MAY   BUS/MRT 846451010 SINGAPORE            2.36"
+# Trailing "CR" marks a credit (payment / refund / rebate).
+_PDF_TXN = re.compile(
+    rf"^\s*(?P<post>\d{{1,2}}\s+(?:{_MONTHS}))"
+    rf"\s+(?P<trans>\d{{1,2}}\s+(?:{_MONTHS}))"
+    rf"\s+(?P<desc>\S.*?)\s\s+(?P<amount>{_AMOUNT})(?:\s+(?P<cr>CR))?\s*$",
+    re.IGNORECASE,
+)
+_PDF_REF = re.compile(r"^\s*Ref No\.?\s*:\s*(\S+)\s*$", re.IGNORECASE)
+_PDF_FOREIGN = re.compile(rf"^\s*(?P<ccy>[A-Z]{{3}})\s+(?P<amount>{_AMOUNT})\s*$")
+_PDF_STMT_DATE = re.compile(
+    rf"Statement\s+Date\s+(\d{{1,2}}\s+(?:{_MONTHS})\s+\d{{4}})", re.IGNORECASE
+)
+_PDF_TXN_END = re.compile(r"End of Transaction Details", re.IGNORECASE)
+
+
+def _pdf_normalise(text: str) -> str:
+    """Drop NUL/control bytes that PDF text extraction can emit."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
+
+def _pdf_statement_date(text: str) -> pd.Timestamp:
+    """Statement date anchors the year, which line items omit."""
+    m = _PDF_STMT_DATE.search(text)
+    if m:
+        try:
+            return pd.to_datetime(re.sub(r"\s+", " ", m.group(1)), format="%d %b %Y")
+        except Exception:
+            pass
+    return pd.Timestamp.today().normalize()
+
+
+def _pdf_date(day_month: str, stmt_date: pd.Timestamp) -> str:
+    """
+    Resolve a bare "09 MAY" against the statement date.
+
+    A statement covers roughly one month back, so a day/month that lands after
+    the statement date belongs to the previous year (Dec entries on a Jan
+    statement). A week of slack absorbs post dates on the statement date itself.
+    """
+    day_month = re.sub(r"\s+", " ", day_month).strip().upper()
+    for year in (stmt_date.year, stmt_date.year - 1):
+        try:
+            dt = pd.to_datetime(f"{day_month} {year}", format="%d %b %Y")
+        except Exception:
+            continue  # e.g. 29 FEB against a non-leap year
+        if dt <= stmt_date + pd.Timedelta(days=7):
+            return dt.strftime("%Y-%m-%d")
+    raise ValueError(f"unparseable date: {day_month}")
+
+
+def parse_uob_pdf(text: str) -> list[dict]:
+    """
+    Parse a UOB credit card PDF e-statement from layout-preserved text.
+
+    Each transaction is a dated line optionally followed by continuation lines:
+
+        11 MAY   09 MAY   EXAMPLE STORE SINGAPORE             12.00
+                          Ref No. : 74123456789012345678901
+                          USD 38.85          ← foreign amount, when applicable
+
+    Summary rows (PREVIOUS BALANCE, SUB TOTAL, TOTAL BALANCE) carry no dates and
+    are skipped by the line pattern. Multi-card statements simply concatenate.
+    """
+    text = _pdf_normalise(text)
+    stmt_date = _pdf_statement_date(text)
+
+    txns: list[dict] = []
+    pending: Optional[dict] = None  # transaction awaiting its continuation lines
+
+    def flush():
+        nonlocal pending
+        if pending is None:
+            return
+        txns.append(
+            _std(
+                pending["date"],
+                pending["desc"],
+                pending["amount"],
+                foreign_amount=pending["foreign_amount"],
+                foreign_currency=pending["foreign_currency"],
+                ref=pending["ref"],
+            )
+        )
+        pending = None
+
+    for line in text.split("\n"):
+        if _PDF_TXN_END.search(line):
+            break
+
+        m = _PDF_TXN.match(line)
+        if m:
+            flush()
+            try:
+                date_str = _pdf_date(m.group("trans"), stmt_date)
+            except Exception:
+                continue
+            amount = float(m.group("amount").replace(",", ""))
+            if m.group("cr"):
+                amount = -amount  # credits are negative, as in the .xls parsers
+            pending = {
+                "date": date_str,
+                "desc": _clean_desc(m.group("desc")),
+                "amount": amount,
+                "ref": None,
+                "foreign_amount": None,
+                "foreign_currency": None,
+            }
+            continue
+
+        if pending is None:
+            continue
+
+        ref = _PDF_REF.match(line)
+        if ref:
+            pending["ref"] = _clean_ref(ref.group(1))
+            continue
+
+        foreign = _PDF_FOREIGN.match(line)
+        if foreign and foreign.group("ccy").upper() != "SGD":
+            pending["foreign_currency"] = foreign.group("ccy").upper()
+            pending["foreign_amount"] = float(foreign.group("amount").replace(",", ""))
+
+    flush()
+    if not txns:
+        raise ValueError("UOB PDF: no transactions found")
+    return txns
+
+
+# ── UOB account (savings / current) PDF statement ─────────────────────────────
+
+_PDF_ACCT_COLUMNS = ("Withdrawals", "Deposits", "Balance")
+_PDF_ACCT_HEADER = re.compile(r"Withdrawals\s+Deposits", re.IGNORECASE)
+_PDF_PERIOD = re.compile(
+    r"Period:\s*\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s+to\s+(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})",
+    re.IGNORECASE,
+)
+_PDF_ACCT_ROW = re.compile(
+    rf"^\s*(?P<date>\d{{1,2}}\s+(?:{_MONTHS}))(?=\s\s)", re.IGNORECASE
+)
+_PDF_ACCT_SKIP = re.compile(r"^(?:BALANCE\s+[BC]/F|Total)\b", re.IGNORECASE)
+
+
+def _pdf_period_end(text: str) -> pd.Timestamp:
+    """Account statements date their range as a period rather than a single date."""
+    m = _PDF_PERIOD.search(text)
+    if m:
+        for fmt in ("%d %b %Y", "%d %B %Y"):
+            try:
+                return pd.to_datetime(re.sub(r"\s+", " ", m.group(1)), format=fmt)
+            except Exception:
+                pass
+    return _pdf_statement_date(text)
+
+
+def parse_uob_account_pdf(text: str) -> list[dict]:
+    """
+    Parse a UOB account (One Account / savings / current) PDF statement.
+
+    Unlike the card statement there is one date column, and debit vs credit is
+    decided by which column an amount sits under — so amounts are matched to
+    the Withdrawals / Deposits / Balance headers by their right edge. The
+    running Balance column is read and discarded; taking the last number on the
+    line would silently import balances as transaction amounts.
+
+        Date      Description        Withdrawals    Deposits     Balance
+        02 May    PAYNOW-FAST               2.40                1,234.56
+                    PIB1234567890123456
+                    EXAMPLE PAY PTE. LTD.
+    """
+    text = _pdf_normalise(text)
+    lines = [line.rstrip() for line in text.split("\n")]
+
+    header = next((line for line in lines if _PDF_ACCT_HEADER.search(line)), None)
+    if header is None:
+        raise ValueError("UOB account PDF: could not find the transaction table header")
+
+    # Right edge of each column heading; amounts are right-aligned beneath them.
+    columns: dict[str, int] = {}
+    for name in _PDF_ACCT_COLUMNS:
+        m = re.search(name, header, re.IGNORECASE)
+        if m:
+            columns[name] = m.end()
+    if "Withdrawals" not in columns or "Deposits" not in columns:
+        raise ValueError("UOB account PDF: missing Withdrawals/Deposits columns")
+
+    period_end = _pdf_period_end(text)
+
+    txns: list[dict] = []
+    pending: Optional[dict] = None
+    started = False
+
+    def flush():
+        nonlocal pending
+        if pending is None:
+            return
+        entry, pending = pending, None
+        if entry["withdrawal"] is None and entry["deposit"] is None:
+            return  # opening balance row
+        desc, ref = _desc_and_ref("\n".join(entry["lines"]))
+        if not desc:
+            return
+        amount = (
+            -entry["deposit"] if entry["deposit"] is not None else entry["withdrawal"]
+        )
+        txns.append(_std(entry["date"], desc, amount, ref=ref))
+
+    for line in lines:
+        if _PDF_TXN_END.search(line):
+            break
+        if _PDF_ACCT_HEADER.search(line):
+            flush()
+            started = True
+            continue
+        if not started or not line.strip():
+            continue
+
+        m = _PDF_ACCT_ROW.match(line)
+        if m:
+            flush()
+
+            amounts: dict[str, float] = {}
+            desc_end = len(line)
+            for found in re.finditer(_AMOUNT, line):
+                column = min(columns, key=lambda c: abs(columns[c] - found.end()))
+                amounts[column] = float(found.group().replace(",", ""))
+                desc_end = min(desc_end, found.start())
+
+            desc = re.sub(r"\s+", " ", line[m.end("date") : desc_end]).strip()
+            if _PDF_ACCT_SKIP.match(desc):
+                continue
+            try:
+                date_str = _pdf_date(m.group("date"), period_end)
+            except Exception:
+                continue
+            pending = {
+                "date": date_str,
+                "lines": [desc],
+                "withdrawal": amounts.get("Withdrawals"),
+                "deposit": amounts.get("Deposits"),
+            }
+            continue
+
+        if pending is not None:
+            stripped = line.strip()
+            if _PDF_ACCT_SKIP.match(stripped):
+                flush()
+                continue
+            pending["lines"].append(stripped)
+
+    flush()
+    if not txns:
+        raise ValueError("UOB account PDF: no transactions found")
+    return txns
+
+
 # ── utilities ─────────────────────────────────────────────────────────────────
+
 
 def _to_float(val) -> Optional[float]:
     if val is None:
@@ -233,19 +750,31 @@ def _parse_date(raw: str) -> str:
 
 # ── auto-detect ───────────────────────────────────────────────────────────────
 
+
 def detect_and_parse(df: pd.DataFrame, hint: str = "") -> tuple[list[dict], str]:
-    all_text = " ".join(str(v) for row in df.values for v in row).lower()
+    all_text = " ".join(str(v) for row in df.head(15).values for v in row).lower()
     hint_lower = hint.lower()
+    header_text = " ".join(str(v) for row in df.head(30).values for v in row).lower()
 
     if "united overseas bank" in all_text or "uob" in hint_lower:
         return parse_uob(df), "UOB"
-    if "dbs" in all_text or "posb" in all_text or "dbs" in hint_lower or "posb" in hint_lower:
+    if (
+        "dbs" in all_text
+        or "posb" in all_text
+        or "dbs" in hint_lower
+        or "posb" in hint_lower
+        or ("transaction ref1" in header_text and "transaction code" in header_text)
+    ):
         return parse_dbs(df), "DBS/POSB"
     if "ocbc" in all_text or "ocbc" in hint_lower:
         return parse_ocbc(df), "OCBC"
 
     errors = []
-    for parser, name in [(parse_uob, "UOB"), (parse_dbs, "DBS/POSB"), (parse_ocbc, "OCBC")]:
+    for parser, name in [
+        (parse_uob, "UOB"),
+        (parse_dbs, "DBS/POSB"),
+        (parse_ocbc, "OCBC"),
+    ]:
         try:
             txns = parser(df)
             if txns:
@@ -254,3 +783,7 @@ def detect_and_parse(df: pd.DataFrame, hint: str = "") -> tuple[list[dict], str]
             errors.append(f"{name}: {e}")
 
     raise ValueError(f"Could not detect bank format. Tried: {'; '.join(errors)}")
+
+
+def parse_bytes(content: bytes, filename: str = "") -> tuple[list[dict], str]:
+    return detect_and_parse(load_table(content, filename), hint=filename)
