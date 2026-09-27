@@ -19,7 +19,14 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 API = os.getenv("BUDGET_APP_URL", "http://127.0.0.1:8000").rstrip("/")
+# MCP_READ_ONLY=true: only reading tools are exposed (use this for scheduled reports)
+READ_ONLY = os.getenv("MCP_READ_ONLY", "false").lower() == "true"
 mcp = FastMCP("budget-app")
+
+
+def write_tool():
+    """Register a tool that changes data — skipped entirely in read-only mode."""
+    return (lambda f: f) if READ_ONLY else mcp.tool()
 
 
 def _req(method: str, path: str, body: dict | None = None, timeout: float = 300):
@@ -75,19 +82,19 @@ def review_pending(kind: str = "") -> dict:
     return _req("GET", f"/review?status=pending&kind={kind}")
 
 
-@mcp.tool()
+@write_tool()
 def review_scan(days: int = 120) -> dict:
     """Scan Actual for duplicates and unlinked transfers in the last N days and queue them."""
     return _req("POST", "/review/scan", {"days": days})
 
 
-@mcp.tool()
+@write_tool()
 def review_ask_ai() -> dict:
     """Have the configured LLM give a verdict + reason on each pending item (advisory only)."""
     return _req("POST", "/review/advise", {})
 
 
-@mcp.tool()
+@write_tool()
 def review_decide(item_id: str, decision: str) -> dict:
     """APPLY a decision to Actual. Only call after the user explicitly approved this item.
     Decisions: import_duplicate: skip|import · existing_duplicate: delete_a|delete_b|keep_both ·
@@ -101,7 +108,7 @@ def review_memory() -> dict:
     return _req("GET", "/review/memory")
 
 
-@mcp.tool()
+@write_tool()
 def reconcile_account(account_id: str, bank_balance: float, as_of: str = "", use_llm: bool = False) -> dict:
     """Compare an Actual account with the balance the bank shows (SGD; for a credit card pass what you
     owe as a positive number). Explains the gap (duplicates, unlinked transfers) and queues fixes for
@@ -139,7 +146,7 @@ def ibkr_to_ghostfolio_preview(trades_json: str, positions_json: str, account_id
         "account_id": account_id or None})
 
 
-@mcp.tool()
+@write_tool()
 def ibkr_to_ghostfolio_import(activities_json: str, positions_json: str = "") -> dict:
     """Import previewed activities (the `new` list, optionally plus `suggested_opening_lots`) into
     Ghostfolio. Only call after the user approved the preview."""
@@ -148,6 +155,25 @@ def ibkr_to_ghostfolio_import(activities_json: str, positions_json: str = "") ->
     return _req("POST", "/investments/ibkr/import", {
         "activities": acts,
         "positions": positions.get("positions", positions) if isinstance(positions, dict) else positions})
+
+
+@mcp.tool()
+def weekly_snapshot() -> dict:
+    """Everything a weekly money report needs in one call: last 7 days of spending vs your usual
+    week (by category, top payees, largest items), month-to-date pace and guidance, net worth /
+    cash / card / investments, pending review items, and service health. Read-only."""
+    week = _req("GET", "/finance/week?days=7")
+    summary = money_summary()
+    review = _req("GET", "/review/counts")
+    h = health()
+    if "error" not in week:
+        week = {**week, "spent": _money(week["spent"]), "usual_week": _money(week["usual_week"]),
+                "categories": [{**c, "spent": _money(c["spent"]), "usual_week": _money(c["usual_week"])} for c in week["categories"]],
+                "top_payees": [{**p, "spent": _money(p["spent"])} for p in week["top_payees"]],
+                "largest": [{**t, "amount": _money(t["amount"])} for t in week["largest"]],
+                "uncategorised": {**week["uncategorised"], "amount": _money(week["uncategorised"]["amount"])}}
+    return {"week": week, "month": summary, "review": review, "health": h,
+            "note": "amounts in SGD; guidance is about cash flow, not investment advice"}
 
 
 @mcp.tool()

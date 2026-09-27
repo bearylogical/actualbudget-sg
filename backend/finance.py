@@ -167,3 +167,49 @@ def brief(summary: dict, llm) -> list[str]:
     slim["categories"] = [{k: c[k] for k in ("name", "spent", "avg", "status")} for c in summary["categories"]]
     data = complete_json(llm, BRIEF_PROMPT, __import__("json").dumps(slim, default=str)) or {}
     return [str(b) for b in data.get("bullets", [])][:6]
+
+
+def week(rows: list[dict], categories: dict[str, str], today: date | None = None, days: int = 7,
+         baseline_weeks: int = 4) -> dict:
+    """
+    Last `days` of spending vs the previous `baseline_weeks` weeks, from raw Actual rows
+    (bridge /txns/range). Transfers and starting balances are excluded; money out only.
+    """
+    from datetime import timedelta
+    today = today or date.today()
+    start = today - timedelta(days=days - 1)
+    base_start = start - timedelta(days=7 * baseline_weeks)
+
+    def spend(t):
+        return (t["amount"] < 0 and not t.get("transfer_id") and not t.get("payee_transfer_acct")
+                and not t.get("starting_balance_flag") and not t.get("is_child") and not t.get("offbudget"))
+
+    this = [t for t in rows if spend(t) and start.isoformat() <= t["date"] <= today.isoformat()]
+    base = [t for t in rows if spend(t) and base_start.isoformat() <= t["date"] < start.isoformat()]
+    total = -sum(t["amount"] for t in this)
+    base_avg = round(-sum(t["amount"] for t in base) / baseline_weeks) if baseline_weeks else 0
+
+    def by(key, items):
+        out: dict[str, int] = {}
+        for t in items:
+            out[key(t)] = out.get(key(t), 0) - t["amount"]
+        return out
+
+    cat = lambda t: categories.get(t.get("category"), "Uncategorised")
+    now_c, base_c = by(cat, this), by(cat, base)
+    cats = sorted(({"category": k, "spent": v, "usual_week": round(base_c.get(k, 0) / baseline_weeks)}
+                   for k, v in now_c.items()), key=lambda c: -c["spent"])
+    payees = sorted(by(lambda t: t.get("payee") or "Unknown", this).items(), key=lambda kv: -kv[1])[:8]
+    big = sorted(this, key=lambda t: t["amount"])[:5]
+    return {
+        "from": start.isoformat(), "to": today.isoformat(),
+        "spent": total, "usual_week": base_avg,
+        "vs_usual": (total - base_avg) / base_avg if base_avg else None,
+        "categories": cats[:10],
+        "top_payees": [{"payee": p, "spent": v} for p, v in payees],
+        "largest": [{"date": t["date"], "payee": t.get("payee"), "amount": -t["amount"],
+                     "account": t.get("account_name"), "category": cat(t)} for t in big],
+        "uncategorised": {"count": sum(1 for t in this if not t.get("category")),
+                          "amount": -sum(t["amount"] for t in this if not t.get("category"))},
+        "transactions": len(this),
+    }

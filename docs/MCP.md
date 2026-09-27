@@ -49,6 +49,27 @@ IBKR itself comes from the **Interactive Brokers connector** in Claude — no se
 * Local MCP servers configured in Claude Desktop are also reachable from Cowork sessions
   linked to this Mac.
 
+## Weekly report (scheduled task)
+
+The **Weekly Money & Portfolio Report** scheduled task (Mondays 9:00 SGT) calls
+`weekly_snapshot` — last 7 days vs your usual week, month-to-date pace and guidance, net
+worth, pending review items, service health — alongside the IBKR connector.
+
+Because the budget-app runs on your network, the run must happen *on your Mac*:
+
+1. Add a **read-only** budget-app server to Claude Desktop (reports never change data):
+   ```json
+   "budget-app-readonly": {
+     "command": "uv",
+     "args": ["run", "--with", "mcp", "--with", "httpx", "python",
+              "/Users/syamil/Projects/budget-app/mcp/server.py"],
+     "env": { "BUDGET_APP_URL": "http://127.0.0.1:8000", "MCP_READ_ONLY": "true" }
+   }
+   ```
+2. In the Claude desktop app, open the scheduled task and turn on **Require this computer**.
+   The Mac must be awake with the app running at 9:00 on Monday; if it isn't, the report
+   still covers IBKR and says the money section was skipped.
+
 ## Things to ask
 
 * "How am I doing this month?" → `money_summary`

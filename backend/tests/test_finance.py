@@ -67,3 +67,20 @@ def test_ghostfolio_summary_and_auth(monkeypatch):
 def test_ghostfolio_not_configured(monkeypatch):
     monkeypatch.delenv("GHOSTFOLIO_URL", raising=False)
     assert ghostfolio.summary() == {"configured": False}
+
+
+def test_week_vs_usual():
+    from datetime import date
+    rows = [
+        {"id": "1", "date": "2026-09-25", "amount": -5000, "category": "c1", "payee": "Koufu", "account_name": "UOB"},
+        {"id": "2", "date": "2026-09-24", "amount": -20000, "category": None, "payee": "Shopee", "account_name": "UOB"},
+        {"id": "3", "date": "2026-09-23", "amount": -152373, "transfer_id": "x", "payee": "Card"},   # transfer: ignored
+        {"id": "4", "date": "2026-09-23", "amount": 788973, "category": "inc", "payee": "Salary"},    # income: ignored
+        {"id": "5", "date": "2026-09-10", "amount": -8000, "category": "c1", "payee": "Koufu"},       # baseline
+        {"id": "6", "date": "2026-09-03", "amount": -8000, "category": "c1", "payee": "Koufu"},       # baseline
+    ]
+    w = finance.week(rows, {"c1": "Dining & Hawker"}, today=date(2026, 9, 27))
+    assert w["spent"] == 25000 and w["usual_week"] == 4000 and w["transactions"] == 2
+    assert w["categories"][0] == {"category": "Uncategorised", "spent": 20000, "usual_week": 0}
+    assert w["uncategorised"] == {"count": 1, "amount": 20000}
+    assert w["largest"][0]["payee"] == "Shopee"
