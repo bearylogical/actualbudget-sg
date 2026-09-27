@@ -8,12 +8,10 @@
 # Optional LLM fallback for merchants no rule recognises (see backend/llm.py).
 # Default is off. For privacy, prefer a local model (Ollama on the homelab).
 x-llm-env: &llm-env
-  LLM_PROVIDER: "none"            # none | ollama | openai | anthropic
-  # LLM_MODEL: "qwen2.5:7b"       # ollama example; or gpt-4o-mini / claude-haiku-4-5
-  # LLM_BASE_URL: "http://ollama.local.bearylogical.net/v1"   # OpenAI-compatible endpoint
-  # LLM_API_KEY: ""               # not needed for ollama
-  # LLM_MIN_CONFIDENCE: "0.5"
-  # LLM_MAX_CONFIDENCE: "0.75"
+  LLM_PROVIDER: "openai"
+  LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
+  LLM_API_KEY: "${GEMINI_API_KEY}"
+  LLM_MODEL: "gemini-3.1-flash-lite"
 
 services:
   actual-bridge:
