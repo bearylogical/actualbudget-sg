@@ -38,6 +38,7 @@ def apply_actions(actions: list[dict]) -> dict:
       {"type": "link",   "keep_id", "other_id", "keep_account", "other_account", "date"}
       {"type": "import", "account": id, "transactions": [parsed rows]}   (forced past the duplicate check)
       {"type": "adjust", "account": id, "amount_cents": int, "date": "YYYY-MM-DD", "note": str}
+      {"type": "categorize", "updates": [{"id", "category", "notes"?}]}
     """
     out = []
     for a in actions:
@@ -60,6 +61,8 @@ def apply_actions(actions: list[dict]) -> dict:
                 "date": a["date"], "amount": int(a["amount_cents"]),
                 "payee_name": a.get("payee", "Reconciliation adjustment"),
                 "notes": a.get("note", "#reconcile"), "cleared": True}]}))
+        elif t == "categorize":
+            out.append(call("POST", "/txns/update", {"updates": a["updates"]}))
         else:
             raise ValueError(f"unknown action type {t!r}")
     errors = [e for r in out for e in (r.get("errors") or [])]
@@ -91,4 +94,7 @@ def actions_for(item: dict) -> list[dict]:
                  "other_account": b["account"], "date": a["date"]}]
     if kind == "reconcile_fix":
         return p["actions"] if d == "apply" else []
+    if kind == "recategorize":
+        from recategorize import update_for
+        return [{"type": "categorize", "updates": [update_for(p)]}] if d == "apply" else []
     raise ValueError(kind)

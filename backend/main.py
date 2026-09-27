@@ -447,6 +447,61 @@ def scan_and_queue(start: str, end: str, account_ids: list[str] | None = None) -
             "items": queued + applied}
 
 
+def recategorize_scan(start: str, end: str, mode: str = "uncategorised", use_llm: bool = True,
+                      account_ids: list[str] | None = None) -> dict:
+    """Propose categories for rows already in Actual and queue them. Learned patterns apply themselves."""
+    import recategorize
+    ctx = ActualContext.from_bridge(bridge_client.call("GET", "/context", timeout=60))
+    rows, _ = bridge_client.txns(start, end, account_ids)
+    proposals = recategorize.propose(rows, ctx, mode=mode, use_llm=use_llm)
+    queued, auto = [], []
+    for p in proposals:
+        it = review.enqueue("recategorize", p, [p["txn"]["id"], p["proposed"]["id"]])
+        if it["status"] == "auto":
+            auto.append(it)
+        elif it["status"] == "pending":
+            queued.append(it)
+    applied = _apply_recategorize(auto)
+    return {"scanned": len(recategorize.candidates(rows)), "proposed": len(proposals),
+            "queued": len(queued), "auto_applied": len(applied)}
+
+
+def _apply_recategorize(items: list[dict]) -> list[dict]:
+    """Apply decided recategorize items in ONE bridge call (hundreds of rows → one sync)."""
+    import recategorize
+    todo = [it for it in items if it.get("decision") == "apply"]
+    for it in items:
+        if it.get("decision") == "keep":
+            review.mark_done(it["id"], {"ok": True, "results": [], "errors": []})
+    if not todo:
+        return []
+    try:
+        r = bridge_client.call("POST", "/txns/update",
+                               {"updates": [recategorize.update_for(it["payload"]) for it in todo]}, timeout=300)
+        failed = {e.split(":", 1)[0] for e in r.get("errors") or []}
+    except Exception as e:
+        r, failed = {"errors": [str(e)]}, {it["payload"]["txn"]["id"] for it in todo}
+    for it in todo:
+        bad = it["payload"]["txn"]["id"] in failed
+        review.mark_done(it["id"], {"ok": not bad, "errors": [x for x in r.get("errors") or []
+                                                              if x.startswith(it["payload"]["txn"]["id"])] or
+                                    (r.get("errors") if bad else [])}, ok=not bad)
+    return todo
+
+
+@app.post("/review/recategorize/scan")
+async def review_recategorize_scan(body: dict | None = None):
+    """{days: 120, mode: "uncategorised"|"all", use_llm: true} or {start, end, account_ids}"""
+    body = body or {}
+    end = body.get("end") or _date.today().isoformat()
+    start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 120)))).isoformat()
+    try:
+        return await run_in_threadpool(recategorize_scan, start, end, body.get("mode", "uncategorised"),
+                                       body.get("use_llm", True), body.get("account_ids"))
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+
+
 @app.get("/review")
 async def review_list(status: str = "pending", kind: str = ""):
     return {"items": review.list_items(status or None, kind or None), "counts": review.counts()}
@@ -471,7 +526,21 @@ async def review_scan(body: dict | None = None):
 
 @app.post("/review/{item_id}/decide")
 async def review_decide(item_id: str, body: dict):
-    """Approve a decision; it is applied to Actual immediately and remembered."""
+    """Approve a decision; it is applied to Actual immediately and remembered.
+    recategorize items also take {category_id} to apply a different category than proposed."""
+    if body.get("category_id"):
+        it = review.get(item_id)
+        if not it:
+            raise HTTPException(404, "no such item")
+        if it["kind"] != "recategorize":
+            raise HTTPException(400, "category_id only applies to recategorize items")
+        ctx = ActualContext.from_bridge(await _bridge("GET", "/context"))
+        cat = ctx.cat_by_id.get(body["category_id"])
+        if not cat:
+            raise HTTPException(400, "unknown category_id")
+        it["payload"]["proposed"] = {**it["payload"]["proposed"], "id": cat["id"], "name": cat["name"],
+                                     "group": cat.get("group_name"), "source": "manual", "confidence": 1.0}
+        review.set_payload(item_id, it["payload"])
     try:
         item = review.decide(item_id, body.get("decision", ""), by="you")
     except KeyError:
@@ -495,7 +564,7 @@ async def review_advise(body: dict | None = None):
         raise HTTPException(400, "LLM is not configured (LLM_PROVIDER)")
     ids = set((body or {}).get("ids") or [])
     items = [i for i in review.list_items("pending") if (not ids or i["id"] in ids)
-             and i["kind"] != "reconcile_fix"][:40]
+             and i["kind"] not in ("reconcile_fix", "recategorize")][:40]
     verdicts = await run_in_threadpool(review.advise, items, llm)
     return {"advised": len(verdicts), "items": review.list_items("pending")}
 
@@ -506,7 +575,13 @@ async def review_accept_ai(body: dict | None = None):
     Deletions are never bulk-approved."""
     min_conf = float((body or {}).get("min_confidence", 0.8))
     done = []
+    # category fixes: the proposal's own confidence; applied together in one bridge call
+    recat = [review.decide(it["id"], "apply", by="you") for it in review.list_items("pending", "recategorize")
+             if it["payload"]["proposed"].get("confidence", 0) >= min_conf]
+    done += await run_in_threadpool(_apply_recategorize, recat)
     for it in review.list_items("pending"):
+        if it["kind"] == "recategorize":
+            continue
         d = review.suggested_decision(it)
         conf = (it.get("llm") or {}).get("confidence", 0)
         if not d or conf < min_conf or d.startswith("delete"):

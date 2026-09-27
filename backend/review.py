@@ -15,6 +15,9 @@ Item kinds and the decisions they accept:
                       own-account transfer) imported as two unrelated rows
                         link           → make it one Actual transfer
                         keep_separate
+  recategorize        a better category for a row already in Actual (recategorize.py)
+                        apply → set the proposed category (or one you pick instead)
+                        keep  → leave it as it is
 
 Learning (table `memory`):
   * pair memory     — the exact pair is never asked again
@@ -47,6 +50,7 @@ DECISIONS = {
     "existing_duplicate": {"delete_a", "delete_b", "keep_both"},
     "transfer_pair": {"link", "keep_separate"},
     "reconcile_fix": {"apply", "reject"},
+    "recategorize": {"apply", "keep"},
 }
 # which decision means "yes, these are the same money movement"
 POSITIVE = {"import_duplicate": "skip", "existing_duplicate": None, "transfer_pair": "link"}
@@ -99,6 +103,10 @@ def pattern_for(kind: str, payload: dict) -> tuple[str, str]:
         t = payload["incoming"]
         return (f"importdup|{payload.get('account')}|{_norm(t.get('payee'))}",
                 f"re-imported rows for “{t.get('payee')}”")
+    if kind == "recategorize":
+        t, new = payload["txn"], payload["proposed"]
+        who = t.get("payee") or t.get("imported_payee")
+        return (f"recat|{_norm(who)}|{new['id']}", f"“{who}” → {new.get('name')}")
     if kind == "reconcile_fix":
         return (f"reconcile|{payload.get('account')}|{payload.get('fix_type', '')}",
                 f"{payload.get('fix_type', 'fix')} on {payload.get('account_name', 'account')}")
@@ -169,6 +177,12 @@ def counts() -> dict:
     return out
 
 
+def set_payload(iid: str, payload: dict):
+    with db() as con:
+        con.execute("UPDATE items SET payload=?, updated=? WHERE id=?",
+                    (json.dumps(payload, default=str), time.time(), iid))
+
+
 def set_llm(iid: str, verdict: dict):
     with db() as con:
         con.execute("UPDATE items SET llm=?, updated=? WHERE id=?", (json.dumps(verdict), time.time(), iid))
@@ -224,7 +238,7 @@ def supersede(ids: set[str], except_id: str | None = None) -> int:
             if r["id"] == except_id:
                 continue
             p = json.loads(r["payload"])
-            refs = {p.get(k, {}).get("id") for k in ("a", "b") if isinstance(p.get(k), dict)}
+            refs = {p.get(k, {}).get("id") for k in ("a", "b", "txn") if isinstance(p.get(k), dict)}
             for act in p.get("actions") or []:
                 refs.update(act.get("ids") or [])
                 refs.update(x for x in (act.get("keep_id"), act.get("other_id")) if x)

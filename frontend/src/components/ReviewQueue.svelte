@@ -1,6 +1,6 @@
 <!--
   ReviewQueue — everything that would change Actual because of a possible duplicate,
-  an unlinked transfer or a reconciliation fix waits here for approval.
+  an unlinked transfer, a reconciliation fix or a category fix waits here for approval.
   AI verdicts are advisory; your decisions are remembered and teach the patterns.
 -->
 <script>
@@ -18,24 +18,31 @@
   let busy = {};                // item id → true while applying
   let error = '';
   let note = '';
+  let kindFilter = '';          // '' = all kinds
+  let categoryGroups = [];      // for overriding a proposed category
+  let override = {};            // item id → category id picked instead of the proposal
 
   const KIND = {
     import_duplicate: 'Possible duplicate at import',
     existing_duplicate: 'Duplicate already in Actual',
     transfer_pair: 'Unlinked transfer',
     reconcile_fix: 'Reconciliation fix',
+    recategorize: 'Category fix',
   };
   const ACTIONS = {
     import_duplicate: [['skip', 'Same transaction — skip'], ['import', 'Different — import it']],
     existing_duplicate: [['delete_a', 'Delete first'], ['delete_b', 'Delete second'], ['keep_both', 'Keep both']],
     transfer_pair: [['link', 'Link as transfer'], ['keep_separate', 'Keep separate']],
     reconcile_fix: [['apply', 'Apply fix'], ['reject', 'Reject']],
+    recategorize: [['apply', 'Apply'], ['keep', 'Keep current']],
   };
   const VERDICT_TO = {
     import_duplicate: { duplicate: 'skip', not_duplicate: 'import' },
     transfer_pair: { transfer: 'link', not_transfer: 'keep_separate' },
     existing_duplicate: { not_duplicate: 'keep_both' },
   };
+  // which button to highlight: the AI verdict, or for category fixes always "apply"
+  const suggested = it => it.kind === 'recategorize' ? 'apply' : VERDICT_TO[it.kind]?.[it.llm?.verdict];
 
   function money(c) { return (c / 100).toLocaleString('en-SG', { style: 'currency', currency: 'SGD' }); }
 
@@ -65,7 +72,9 @@
   async function decide(it, decision) {
     busy = { ...busy, [it.id]: true }; error = '';
     try {
-      const r = await post(`/review/${it.id}/decide`, { decision });
+      const body = { decision };
+      if (it.kind === 'recategorize' && decision === 'apply' && override[it.id]) body.category_id = override[it.id];
+      const r = await post(`/review/${it.id}/decide`, body);
       if (r.applied && !r.applied.ok) error = `Applied with errors: ${r.applied.errors.join('; ')}`;
       dispatch('changed');
       await load();
@@ -82,6 +91,23 @@
     } catch (e) { error = e.message; }
     await load();
   }
+  async function scanCategories() {
+    loading = true; note = ''; error = '';
+    try {
+      const r = await post('/review/recategorize/scan', { days: 120, use_llm: true });
+      note = `Categories: checked ${r.scanned} row(s), ${r.queued} new fix(es)` +
+        (r.auto_applied ? `, ${r.auto_applied} applied from what you taught it` : '');
+      kindFilter = 'recategorize';
+      dispatch('changed');
+    } catch (e) { error = e.message; }
+    await load();
+  }
+  async function loadCategories() {
+    if (categoryGroups.length) return;
+    try { categoryGroups = (await readJson(await fetch(`${API}/actual/categories`))).categoryGroups || []; } catch {}
+  }
+  $: if (items.some(i => i.kind === 'recategorize')) loadCategories();
+
   async function advise() {
     loading = true; note = ''; error = '';
     try { const r = await post('/review/advise', {}); note = `AI reviewed ${r.advised} item(s)`; }
@@ -92,7 +118,7 @@
     loading = true; note = ''; error = '';
     try {
       const r = await post('/review/accept-ai', { min_confidence: 0.8 });
-      note = `Applied ${r.applied} AI suggestion(s) with ≥80% confidence (deletions always need you)`;
+      note = `Applied ${r.applied} suggestion(s) with ≥80% confidence (deletions always need you)`;
       dispatch('changed');
     } catch (e) { error = e.message; }
     await load();
@@ -109,10 +135,13 @@
       const t = p.incoming;
       return [{ tag: 'Incoming', date: t.date, amount: (t.is_credit ? 1 : -1) * Math.round(t.amount * 100), payee: t.payee, text: t.description, acct: p.account_name }];
     }
+    if (it.kind === 'recategorize') { const t = p.txn; return [{ tag: 'Txn', ...t, text: t.imported_payee, acct: t.account_name }]; }
     if (p.a && p.b) return [{ tag: 'A', ...p.a, text: p.a.imported_payee, acct: p.a.account_name }, { tag: 'B', ...p.b, text: p.b.imported_payee, acct: p.b.account_name }];
     return [];
   }
-  $: aiCount = items.filter(i => i.llm).length;
+  $: aiCount = items.filter(i => i.llm || i.kind === 'recategorize').length;
+  $: kinds = [...new Set(items.map(i => i.kind))];
+  $: shown = kindFilter ? items.filter(i => i.kind === kindFilter) : items;
 </script>
 
 <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
@@ -131,8 +160,15 @@
     {#if tab === 'pending'}
       <div class="bar">
         <button class="ghost small" on:click={scan} disabled={loading}>🔎 Scan Actual (120 days)</button>
-        <button class="ghost small" on:click={advise} disabled={loading || !items.length}>🤖 Ask AI</button>
-        <button class="ghost small" on:click={acceptAI} disabled={loading || !aiCount}>✓ Accept AI ≥80%</button>
+        <button class="ghost small" on:click={scanCategories} disabled={loading}>🏷 Fix categories (120 days)</button>
+        <button class="ghost small" on:click={advise} disabled={loading || !items.some(i => i.kind !== 'recategorize')}>🤖 Ask AI</button>
+        <button class="ghost small" on:click={acceptAI} disabled={loading || !aiCount}>✓ Accept suggestions ≥80%</button>
+        {#if kinds.length > 1}
+          <select class="small" bind:value={kindFilter}>
+            <option value="">All ({items.length})</option>
+            {#each kinds as k}<option value={k}>{KIND[k]} ({items.filter(i => i.kind === k).length})</option>{/each}
+          </select>
+        {/if}
         {#if loading}<span class="spinner"></span>{/if}
         <span class="muted">{note}</span>
       </div>
@@ -141,7 +177,8 @@
 
     <div class="list">
       {#if tab === 'memory'}
-        <p class="muted">A pattern resolves new items on its own after you've made the same decision {learnAfter}×.
+        <p class="muted">A pattern resolves new items on its own after you've made the same decision {learnAfter}×
+          (for category fixes: the same payee → category).
           Deletions and reconciliation fixes are never automated.</p>
         {#each memory as m}
           <div class="mem">
@@ -151,7 +188,7 @@
           </div>
         {:else}<p class="muted">Nothing learned yet.</p>{/each}
       {:else}
-        {#each items as it (it.id)}
+        {#each shown as it (it.id)}
           <div class="item" class:done={it.status !== 'pending'}>
             <div class="item-head">
               <span class="kind">{KIND[it.kind]}</span>
@@ -175,13 +212,30 @@
                     : a.type === 'delete' ? `${a.ids.length} transaction(s)` : a.type === 'adjust' ? `${money(a.amount_cents)} on ${a.date}` : 'link transfer'}</span></div>
               {/each}
             {/if}
+            {#if it.kind === 'recategorize'}
+              <div class="recat">
+                <span class="muted">{it.payload.current?.name ?? 'Uncategorised'}</span> →
+                <strong>{it.payload.proposed.name}</strong>
+                <span class="ai-badge">{it.payload.proposed.source} {Math.round((it.payload.proposed.confidence ?? 0) * 100)}%</span>
+                {#if it.status === 'pending' && categoryGroups.length}
+                  <select class="small" bind:value={override[it.id]} title="Apply a different category">
+                    <option value={undefined}>…or pick another</option>
+                    {#each categoryGroups as g}
+                      <optgroup label={g.name}>
+                        {#each (g.categories || []).filter(c => !c.hidden) as c}<option value={c.id}>{c.name}</option>{/each}
+                      </optgroup>
+                    {/each}
+                  </select>
+                {/if}
+              </div>
+            {/if}
             {#if it.llm}
               <div class="ai"><span class="ai-badge">AI: {it.llm.verdict} {Math.round(it.llm.confidence * 100)}%</span> {it.llm.reason}</div>
             {/if}
             {#if it.status === 'pending'}
               <div class="actions">
                 {#each ACTIONS[it.kind] as [d, label]}
-                  <button class:primary={VERDICT_TO[it.kind]?.[it.llm?.verdict] === d} class:ghost={VERDICT_TO[it.kind]?.[it.llm?.verdict] !== d}
+                  <button class:primary={suggested(it) === d} class:ghost={suggested(it) !== d}
                     class="small" disabled={busy[it.id]} on:click={() => decide(it, d)}>{label}</button>
                 {/each}
                 <button class="ghost small" on:click={() => dismiss(it)}>Later</button>
@@ -219,6 +273,7 @@
   .amt.pos { color: var(--accent2); }
   .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   .ai { font-size: 12px; color: var(--text2); }
+  .recat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .ai-badge { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); border-radius: 999px; padding: 1px 8px; font-size: 11px; margin-right: 6px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .small { font-size: 12px; padding: 4px 10px; }

@@ -463,6 +463,24 @@ app.post('/txns/add', (req, res) => serialised(async () => {
   }
 }));
 
+// Set category (and optionally notes) on existing rows — approved category fixes.
+// updates: [{ id, category, notes? }]
+app.post('/txns/update', (req, res) => serialised(async () => {
+  if (!requireBudget(res)) return;
+  const { updates = [] } = req.body || {};
+  const result = { updated: 0, errors: [] };
+  for (const u of updates) {
+    try {
+      const fields = { category: u.category };
+      if ('notes' in u) fields.notes = u.notes;
+      await api.updateTransaction(u.id, fields);
+      result.updated++;
+    } catch (e) { result.errors.push(`${u.id}: ${errMsg(e)}`); }
+  }
+  await api.sync();
+  res.json({ ok: true, ...result });
+}));
+
 // Turn two separately imported rows into one Actual transfer.
 // pairs: [{ keep_id, other_id }] — keep_id's account keeps its row; other_id is replaced
 // by the transfer counterpart Actual creates. The deleted original's imported_id stays
