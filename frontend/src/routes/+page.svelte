@@ -2,6 +2,8 @@
   import '../app.css';
   import ActualSidebar from '../components/ActualSidebar.svelte';
   import CategoryMapper from '../components/CategoryMapper.svelte';
+  import RulesAudit from '../components/RulesAudit.svelte';
+  import { onMount } from 'svelte';
 
   const API = '/api';
 
@@ -44,8 +46,14 @@
   let showCredits = true;
 
   // ── Import state ──────────────────────────────────────────────────────────────
-  let showMapper = false;       // category mapping modal
-  let categoryMap = {};         // ourLabel → actualCategoryId
+  let showMapper = false;       // category mapping modal (unmapped seed categories → Actual)
+  let showAudit = false;        // rules audit modal
+  let learnRules = true;        // after import, turn manual category edits into Actual payee rules
+  let useLLM = true;            // ask the LLM about merchants nothing else recognises
+  let llmStatus = null;         // { enabled, provider, model }
+  let catStats = null;          // { actual, seed, llm, manual, transfer, review, unmapped }
+  let recategorising = false;
+  let taxonomy = [];            // fallback category list when Actual isn't connected
   let importing = false;
   let importResult = null;
   let importError = '';
@@ -54,17 +62,25 @@
   let includeCredits = true;    // send credit (deposit/refund) rows alongside debits
   let confirmDestination = false; // user must tick "import to this account" before import
 
-  // ── Category colours ─────────────────────────────────────────────────────────
-  const CAT_COLORS = {
-    'Food & Dining': '#f7931e', 'Groceries': '#4caf50', 'Transport': '#2196f3',
-    'Shopping': '#e91e63', 'Electronics': '#9c27b0', 'Bills & Utilities': '#ff5722',
-    'Software & Cloud': '#00bcd4', 'Subscriptions': '#673ab7', 'Health & Fitness': '#8bc34a',
-    'Health & Medical': '#f44336', 'Entertainment': '#ff9800', 'Travel': '#03a9f4',
-    'Payment / Transfer': '#607d8b', 'Insurance': '#795548', 'Work / Corporate': '#546e7a',
-    'Donations': '#009688', 'Education': '#3f51b5', 'Personal Care': '#e91e63',
-    'Uncategorized': '#455a64'
-  };
-  const CATEGORIES = Object.keys(CAT_COLORS);
+  // ── Categories & colours ──────────────────────────────────────────────────────
+  const UNCAT = 'Uncategorized';
+  function catColor(name) {
+    if (!name || name === UNCAT) return '#6b7280';
+    let h = 0;
+    for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
+    return `hsl(${h} 65% 55%)`;
+  }
+  $: actualCats = actualCategoryGroups.flatMap(g => (g.categories || []).filter(c => !c.hidden).map(c => ({ ...c, group: g.name })));
+  $: CATEGORIES = actualBudgetLoaded && actualCats.length
+    ? [...new Set(actualCats.map(c => c.name)), UNCAT]
+    : [...taxonomy, UNCAT];
+
+  const SOURCE_LABEL = { actual: 'Actual rule', seed: 'Seed rule', llm: 'AI guess', manual: 'Manual' };
+
+  onMount(async () => {
+    try { taxonomy = (await (await fetch(`${API}/taxonomy`)).json()).categories || []; } catch {}
+    try { llmStatus = await (await fetch(`${API}/llm/status`)).json(); } catch {}
+  });
 
   // ── Derived ───────────────────────────────────────────────────────────────────
   $: displayTxns = showCredits ? transactions : transactions.filter(t => !t.is_credit);
@@ -99,13 +115,14 @@
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await fetch(`${API}/parse`, { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(await res.text());
+      const qs = new URLSearchParams({ account_id: actualAccountId || '', use_llm: String(useLLM) });
+      const res = await fetch(`${API}/parse?${qs}`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
       const data = await res.json();
       transactions = data.transactions.map((t, i) => ({ ...t, id: i }));
+      catStats = data.stats;
       detectedBank = data.bank || '';
-      // Auto-build category map from Actual data when available
-      if (actualBudgetLoaded) rebuildCategoryMap();
+      lastCtxKey = ctxKey;
     } catch (e) { parseError = e.message; }
     finally { loading = false; }
   }
@@ -119,41 +136,55 @@
   // ── Category editing ──────────────────────────────────────────────────────────
   function startEdit(t) { editingId = t.id; editingCategory = t.category; }
   function saveEdit(t) {
-    transactions = transactions.map(tx => tx.id === t.id ? { ...tx, category: editingCategory } : tx);
+    if (editingId !== t.id) return;
+    const picked = editingCategory;
     editingId = null;
+    if (picked === t.category) return;
+    const hit = actualCats.find(c => c.name === picked);
+    // apply to every row with the same payee — that's what the learned rule will do too
+    transactions = transactions.map(tx =>
+      (tx.id === t.id || (tx.payee && tx.payee === t.payee && tx.is_credit === t.is_credit && tx.source !== 'manual'))
+        ? { ...tx, category: picked, category_id: hit?.id ?? null, source: 'manual', confidence: 1,
+            unmapped: false, notes: (tx.notes || '').replace(/#llm|#review/g, '').trim() }
+        : tx);
   }
 
-  // ── Category map builder ──────────────────────────────────────────────────────
-  function rebuildCategoryMap() {
-    const allCats = actualCategoryGroups.flatMap(g => g.categories || []);
-    const payeeRuleCat = {};
-    for (const rule of actualRules) {
-      const ca = rule.actions?.find(a => a.field === 'category');
-      const pc = rule.conditions?.find(c => c.field === 'payee');
-      if (ca && pc) payeeRuleCat[pc.value] = ca.value;
-    }
-    const payeeNameId = {};
-    for (const p of actualPayees) payeeNameId[p.name.toLowerCase()] = p.id;
+  // ── Re-categorise when the Actual context changes ────────────────────────────
+  // (connect/disconnect, switch account, change aliases). Manual edits are kept.
+  $: ctxKey = `${actualBudgetLoaded}|${actualAccountId}|${actualRules.length}|${actualCats.length}`;
+  let lastCtxKey = '';
+  $: if (transactions.length && ctxKey !== lastCtxKey) recategorise();
 
-    const ourCats = [...new Set(spending.map(t => t.category))];
-    const map = {};
-    for (const cat of ourCats) {
-      const exact = allCats.find(c => c.name.toLowerCase() === cat.toLowerCase());
-      if (exact) { map[cat] = exact.id; continue; }
-      const words = cat.toLowerCase().split(/[\s&/]+/).filter(w => w.length > 3);
-      let found = null;
-      for (const [pname, pid] of Object.entries(payeeNameId)) {
-        if (words.some(w => pname.includes(w)) && payeeRuleCat[pid]) {
-          found = payeeRuleCat[pid]; break;
-        }
+  async function recategorise() {
+    lastCtxKey = ctxKey;
+    if (!transactions.length) return;
+    recategorising = true;
+    try {
+      const res = await fetch(`${API}/categorize`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactions, account_id: actualAccountId || null, use_llm: useLLM }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        transactions = data.transactions.map((t, i) => ({ ...t, id: transactions[i]?.id ?? i }));
+        catStats = data.stats;
       }
-      map[cat] = found ?? '';
-    }
-    categoryMap = map;
+    } catch {}
+    finally { recategorising = false; }
   }
 
-  // When Actual loads, rebuild map for any already-loaded transactions
-  $: if (actualBudgetLoaded && spending.length) rebuildCategoryMap();
+  $: unmappedCount = transactions.filter(t => t.unmapped).length;
+
+  async function refreshCategories() {
+    try {
+      const res = await fetch(`${API}/actual/categories`);
+      if (res.ok) actualCategoryGroups = (await res.json()).categoryGroups || actualCategoryGroups;
+    } catch {}
+    try {
+      const res = await fetch(`${API}/actual/rules`);
+      if (res.ok) actualRules = (await res.json()).rules || actualRules;
+    } catch {}
+  }
 
   // ── Import ────────────────────────────────────────────────────────────────────
   // Backend now generates imported_id (ref-based or hash); legacy ids cover older formats.
@@ -172,9 +203,9 @@
   async function buildPayload(dr = false) {
     const rows = await Promise.all(importable.map(async t => ({
       ...t,
-      category_id: categoryMap[t.category] || undefined,
-      notes: t.category,
-      legacy_ids: [legacyStmtId(t), await legacyHash(t)],
+      category_id: t.category_id || undefined,
+      notes: t.notes || '',
+      legacy_ids: [...(t.legacy_ids || []), legacyStmtId(t), await legacyHash(t)],
     })));
     return {
       accountId: actualAccountId,
@@ -217,8 +248,30 @@
       if (!res.ok) throw new Error(data.error);
       importResult = data;
       confirmDestination = false;
+      if (learnRules) await learnFromManualEdits();
     } catch (e) { importError = e.message; }
     finally { importing = false; }
+  }
+
+  // Manual edits become "payee is X → category" rules in Actual, so next month's
+  // statement (and the scheduler) gets them right without this UI.
+  async function learnFromManualEdits() {
+    const seen = new Set();
+    const mappings = [];
+    for (const t of importable) {
+      if (t.source !== 'manual' || !t.category_id || !t.payee || seen.has(t.payee)) continue;
+      seen.add(t.payee);
+      mappings.push({ description: t.payee, categoryId: t.category_id });
+    }
+    if (!mappings.length) return;
+    try {
+      const res = await fetch(`${API}/actual/rules`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings }),
+      });
+      const data = await res.json();
+      if (res.ok) importResult = { ...importResult, rulesCreated: data.created };
+    } catch {}
   }
 
   // Reset confirmation whenever the destination account changes.
@@ -246,17 +299,30 @@
   // ── Formatters ────────────────────────────────────────────────────────────────
   function fmtAmt(n) { return n.toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
   function fmtDate(d) { return new Date(d).toLocaleDateString('en-SG', { day: '2-digit', month: 'short', year: 'numeric' }); }
-  function confClass(c) { return c >= 0.9 ? 'high' : c >= 0.75 ? 'med' : 'low'; }
+  function srcClass(t) { return t.source || (t.kind === 'transfer' ? 'transfer' : 'none'); }
+  function srcLabel(t) {
+    if (t.source) return SOURCE_LABEL[t.source] + (t.source === 'llm' ? ` ${Math.round(t.confidence * 100)}%` : '');
+    if (t.kind === 'transfer') return 'Transfer';
+    if (t.kind === 'p2p') return 'PayNow/FAST';
+    return '—';
+  }
 </script>
 
-<!-- Category Mapping Modal -->
+<!-- Category Mapping Modal: seed categories with no match in Actual → pick one (saved as aliases) -->
 {#if showMapper}
   <CategoryMapper
-    {spending}
-    {categoryMap}
+    transactions={transactions.filter(t => t.unmapped)}
     {actualCategoryGroups}
-    on:save={e => { categoryMap = e.detail; showMapper = false; }}
+    on:save={async () => { showMapper = false; await refreshCategories(); lastCtxKey = ''; }}
     on:close={() => showMapper = false}
+  />
+{/if}
+
+{#if showAudit}
+  <RulesAudit
+    sampleDescriptions={transactions.map(t => t.description)}
+    on:applied={async () => { await refreshCategories(); lastCtxKey = ''; }}
+    on:close={() => showAudit = false}
   />
 {/if}
 
@@ -281,6 +347,14 @@
         <span class="app-title">💳 Budget Parser</span>
         {#if detectedBank}
           <span class="badge">{detectedBank}</span>
+        {/if}
+        {#if actualBudgetLoaded}
+          <button class="ghost icon-btn" on:click={() => showAudit = true} title="Audit & sync Actual rules">🧹 Rules audit</button>
+        {/if}
+        {#if llmStatus?.enabled}
+          <label class="checkbox-inline" title="{llmStatus.provider} · {llmStatus.model}">
+            <input type="checkbox" bind:checked={useLLM} on:change={() => { lastCtxKey = ''; }} /> AI fallback
+          </label>
         {/if}
       </div>
       {#if transactions.length}
@@ -319,11 +393,11 @@
               <p class="drop-title">Drop your bank statement here</p>
               <p class="drop-sub">or click to browse</p>
               <div class="banks">
-                <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span>XLS / XLSX</span>
+                <span>UOB</span><span>DBS / POSB</span><span>OCBC</span><span>XLS / XLSX / CSV</span>
               </div>
             {/if}
           </div>
-          <input id="fi" type="file" accept=".xls,.xlsx" style="display:none"
+          <input id="fi" type="file" accept=".xls,.xlsx,.csv" style="display:none"
             on:change={e => uploadFile(e.target.files[0])} />
           {#if parseError}
             <div class="error-msg">{parseError}</div>
@@ -338,7 +412,7 @@
             <div class="import-bar-left">
               {#if importResult}
                 <span class="success-msg">
-                  ✓ Imported: {importResult.added} added, {importResult.updated} updated{importResult.skipped ? `, ${importResult.skipped} skipped` : ''}
+                  ✓ Imported: {importResult.added} added, {importResult.updated} updated{importResult.skipped ? `, ${importResult.skipped} skipped` : ''}{importResult.rulesCreated ? ` · ${importResult.rulesCreated} rules learned` : ''}
                 </span>
               {:else if dryRunResult}
                 <span class="dryrun-msg">
@@ -357,9 +431,15 @@
                 <input type="checkbox" bind:checked={includeCredits} />
                 Credits
               </label>
-              <button class="ghost icon-btn" on:click={() => { rebuildCategoryMap(); showMapper = true; }}>
-                🗂 Categories ({Object.values(categoryMap).filter(Boolean).length}/{[...new Set(importable.map(t=>t.category))].length} mapped)
-              </button>
+              {#if unmappedCount}
+                <button class="ghost icon-btn warn" on:click={() => showMapper = true}
+                  title="Seed categories with no matching category in Actual">
+                  🗂 Map {unmappedCount} unmapped
+                </button>
+              {/if}
+              <label class="checkbox-inline" title="Turn your manual category edits into Actual payee rules after import">
+                <input type="checkbox" bind:checked={learnRules} /> Learn rules
+              </label>
               <button class="ghost icon-btn" on:click={runDryRun} disabled={importing || !actualAccountId}>
                 {importing ? '…' : '🔍 Dry Run'}
               </button>
@@ -440,6 +520,13 @@
           <div class="stat-chip"><span>Showing</span><strong>{filtered.length}</strong></div>
           <div class="stat-chip"><span>Total Spend</span><strong>SGD {fmtAmt(totalSpend)}</strong></div>
           <div class="stat-chip"><span>Auto-categorised</span><strong>{categorisedCount}/{transactions.length}</strong></div>
+          {#if catStats}
+            <div class="stat-chip" title="Actual rules · seed rules · AI · manual">
+              <span>By</span><strong>{catStats.actual} rule · {catStats.seed} seed · {catStats.llm} AI</strong>
+            </div>
+            {#if catStats.review}<div class="stat-chip warn"><span>#review</span><strong>{catStats.review}</strong></div>{/if}
+          {/if}
+          {#if recategorising}<span class="spinner"></span>{/if}
         </div>
 
         <!-- Table -->
@@ -450,7 +537,7 @@
                 <th>Date</th>
                 <th>Description</th>
                 <th>Category</th>
-                <th>Conf</th>
+                <th>Source</th>
                 <th class="r">Amount</th>
               </tr>
             </thead>
@@ -459,7 +546,8 @@
                 <tr class:credit={t.is_credit}>
                   <td class="td-date">{fmtDate(t.date)}</td>
                   <td class="td-desc">
-                    <span>{t.description}</span>
+                    <span class="payee">{t.payee || t.description}</span>
+                    {#if t.payee && t.payee !== t.description}<span class="raw-desc">{t.description}</span>{/if}
                     {#if t.foreign_amount}
                       <span class="foreign">{t.foreign_currency} {t.foreign_amount}</span>
                     {/if}
@@ -468,20 +556,29 @@
                     {#if editingId === t.id}
                       <select bind:value={editingCategory}
                         on:change={() => saveEdit(t)} on:blur={() => saveEdit(t)}>
-                        {#each CATEGORIES as c}<option value={c}>{c}</option>{/each}
+                        {#if actualBudgetLoaded && actualCats.length}
+                          {#each actualCategoryGroups as g}
+                            <optgroup label={g.name}>
+                              {#each (g.categories || []).filter(c => !c.hidden) as c}<option value={c.name}>{c.name}</option>{/each}
+                            </optgroup>
+                          {/each}
+                          <option value={UNCAT}>{UNCAT}</option>
+                        {:else}
+                          {#each CATEGORIES as c}<option value={c}>{c}</option>{/each}
+                        {/if}
                       </select>
                     {:else}
                       <button class="cat-badge"
-                        style="background:{CAT_COLORS[t.category]}22;color:{CAT_COLORS[t.category]};border-color:{CAT_COLORS[t.category]}55"
+                        class:unmapped={t.unmapped}
+                        style="--c:{catColor(t.category)}"
+                        title={t.unmapped ? 'No matching category in Actual — use “Map unmapped”' : ''}
                         on:click={() => startEdit(t)}>
-                        {t.category} ✎
+                        {t.category}{t.unmapped ? ' ⚠' : ''} ✎
                       </button>
                     {/if}
                   </td>
                   <td>
-                    {#if !t.is_credit}
-                      <span class="conf {confClass(t.confidence)}">{Math.round(t.confidence*100)}%</span>
-                    {/if}
+                    <span class="src {srcClass(t)}">{srcLabel(t)}</span>
                   </td>
                   <td class="r amt" class:credit-amt={t.is_credit}>
                     {t.is_credit ? '+' : ''}{t.currency} {fmtAmt(t.amount)}
@@ -503,12 +600,12 @@
             {#each summaryData as { cat, total }}
               <div class="summary-card">
                 <div class="sc-top">
-                  <span class="sc-dot" style="background:{CAT_COLORS[cat] ?? '#888'}"></span>
+                  <span class="sc-dot" style="background:{catColor(cat)}"></span>
                   <span class="sc-name">{cat}</span>
                   <span class="sc-pct">{((total/totalSpend)*100).toFixed(1)}%</span>
                 </div>
                 <div class="sc-bar-bg">
-                  <div class="sc-bar" style="width:{(total/totalSpend)*100}%;background:{CAT_COLORS[cat] ?? '#888'}"></div>
+                  <div class="sc-bar" style="width:{(total/totalSpend)*100}%;background:{catColor(cat)}"></div>
                 </div>
                 <div class="sc-amt">SGD {fmtAmt(total)}</div>
               </div>
@@ -641,10 +738,17 @@
   }
   .cat-badge:hover { opacity: 0.8; }
 
-  .conf { font-size: 11px; padding: 2px 7px; border-radius: 999px; }
-  .conf.high { background: #00c9a722; color: var(--accent2); }
-  .conf.med  { background: #f7931e22; color: var(--warn); }
-  .conf.low  { background: #ff6b6b22; color: var(--danger); }
+  .src { font-size: 11px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; background: var(--surface2); color: var(--text2); }
+  .src.actual { background: #00c9a722; color: var(--accent2); }
+  .src.seed   { background: #3b82f622; color: #60a5fa; }
+  .src.llm    { background: #f7931e22; color: var(--warn); }
+  .src.manual { background: #a855f722; color: #c084fc; }
+  .payee { display: block; font-weight: 500; }
+  .raw-desc { display: block; font-size: 11px; color: var(--text2); }
+  .cat-badge { background: color-mix(in srgb, var(--c) 14%, transparent); color: var(--c); border-color: color-mix(in srgb, var(--c) 35%, transparent); }
+  .cat-badge.unmapped { outline: 1px dashed var(--warn); }
+  .stat-chip.warn strong { color: var(--warn); }
+  button.warn { color: var(--warn); }
 
   .amt { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .credit-amt { color: var(--accent2); }

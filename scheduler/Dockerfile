@@ -8,7 +8,7 @@ COPY scheduler/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Shared modules from backend — single source of truth
-COPY backend/parsers.py backend/categorizer.py .
+COPY backend/*.py ./
 # Scheduler entrypoint
 COPY scheduler/scheduler.py .
 

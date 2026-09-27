@@ -148,7 +148,9 @@ app.post('/categories', async (req, res) => {
   try {
     let targetGroupId = groupId;
     if (!targetGroupId && groupName) {
-      targetGroupId = await api.createCategoryGroup({ name: groupName });
+      const groups = await api.getCategoryGroups();
+      const existing = groups.find(g => g.name.toLowerCase() === groupName.toLowerCase());
+      targetGroupId = existing ? existing.id : await api.createCategoryGroup({ name: groupName });
     }
     if (!targetGroupId) return res.status(400).json({ error: 'groupId or groupName required' });
     const id = await api.createCategory({ name, group_id: targetGroupId });
@@ -216,6 +218,116 @@ app.post('/rules', async (req, res) => {
   }
 });
 
+// ── Full context for categorisation / rules audit ───────────────────────────
+async function loadContext() {
+  const [accounts, categoryGroups, payees, rules] = await Promise.all([
+    api.getAccounts(), api.getCategoryGroups(), api.getPayees(), api.getRules(),
+  ]);
+  const categories = categoryGroups.flatMap(g => (g.categories || []).map(c => ({
+    id: c.id, name: c.name, hidden: !!c.hidden,
+    group_id: g.id, group_name: g.name, is_income: !!g.is_income,
+  })));
+  return { accounts, categoryGroups, categories, payees, rules };
+}
+
+app.get('/context', async (_, res) => {
+  if (!requireBudget(res)) return;
+  try {
+    res.json(await loadContext());
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e) });
+  }
+});
+
+// Apply a sync plan produced by backend/rules_audit.py.
+// Body: { createCategories: [{name, group, is_income}],
+//         mergePayees: [{target, target_id, payees: [{id, name}]}],
+//         createRules: [{stage, conditionsOp, conditions, actions}],   values may be
+//                       {"$payee": name} (created if missing) or {"$category": name}
+//         deleteRules: [ruleId] }
+app.post('/rules/apply', async (req, res) => {
+  if (!requireBudget(res)) return;
+  const {
+    createCategories = [], mergePayees = [], createRules = [], deleteRules = [],
+  } = req.body || {};
+  const result = { categories: 0, merged: 0, rules: 0, deleted: 0, errors: [] };
+  try {
+    let ctx = await loadContext();
+    const groupByName = new Map(ctx.categoryGroups.map(g => [g.name.toLowerCase(), g]));
+    const catByName = new Map(ctx.categories.map(c => [c.name.toLowerCase(), c.id]));
+    const payeeByName = new Map(ctx.payees.map(p => [p.name.toLowerCase().trim(), p.id]));
+
+    async function ensurePayee(name) {
+      const key = name.toLowerCase().trim();
+      if (payeeByName.has(key)) return payeeByName.get(key);
+      const id = await api.createPayee({ name });
+      payeeByName.set(key, id);
+      return id;
+    }
+
+    // 1. categories
+    for (const c of createCategories) {
+      try {
+        if (catByName.has(c.name.toLowerCase())) continue;
+        let group = groupByName.get((c.group || 'Imported').toLowerCase());
+        if (!group) {
+          const gid = await api.createCategoryGroup({ name: c.group || 'Imported', is_income: !!c.is_income });
+          group = { id: gid, name: c.group };
+          groupByName.set((c.group || 'Imported').toLowerCase(), group);
+        }
+        const id = await api.createCategory({ name: c.name, group_id: group.id });
+        catByName.set(c.name.toLowerCase(), id);
+        result.categories++;
+      } catch (e) { result.errors.push(`category ${c.name}: ${errMsg(e)}`); }
+    }
+
+    // 2. payee merges
+    for (const m of mergePayees) {
+      try {
+        const targetId = m.target_id || await ensurePayee(m.target);
+        const ids = (m.payees || []).map(p => p.id).filter(id => id && id !== targetId);
+        if (!ids.length) continue;
+        await api.mergePayees(targetId, ids);
+        result.merged += ids.length;
+      } catch (e) { result.errors.push(`merge → ${m.target}: ${errMsg(e)}`); }
+    }
+
+    // 3. rules
+    async function resolveValue(v) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        if (v.$payee) return ensurePayee(v.$payee);
+        if (v.$category) {
+          const id = catByName.get(v.$category.toLowerCase());
+          if (!id) throw new Error(`category "${v.$category}" not found`);
+          return id;
+        }
+      }
+      return v;
+    }
+    for (const r of createRules) {
+      try {
+        const conditions = [];
+        for (const c of r.conditions || []) conditions.push({ field: c.field, op: c.op, value: await resolveValue(c.value) });
+        const actions = [];
+        for (const a of r.actions || []) actions.push({ field: a.field, op: a.op, value: await resolveValue(a.value) });
+        await api.createRule({ stage: r.stage ?? null, conditionsOp: r.conditionsOp || 'and', conditions, actions });
+        result.rules++;
+      } catch (e) { result.errors.push(`rule (${r.why || 'unnamed'}): ${errMsg(e)}`); }
+    }
+
+    // 4. deletions
+    for (const id of deleteRules) {
+      try { await api.deleteRule(id); result.deleted++; }
+      catch (e) { result.errors.push(`delete ${id}: ${errMsg(e)}`); }
+    }
+
+    await api.sync();
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: errMsg(e), ...result });
+  }
+});
+
 app.post('/preview', async (req, res) => {
   if (!requireBudget(res)) return;
   const { accountId, startDate, endDate } = req.body;
@@ -242,7 +354,10 @@ app.get('/budget-month/:month', async (req, res) => {
 });
 
 function buildActualTxn(t, payeeByName) {
-  const existingPayeeId = payeeByName.get(t.description.toLowerCase().trim());
+  // Clean payee name (backend/payees.py) so Actual's per-payee learning works;
+  // the raw statement text is kept in imported_payee for rules and auditing.
+  const payeeName = (t.payee || t.description || '').trim();
+  const existingPayeeId = payeeByName.get(payeeName.toLowerCase());
   const txn = {
     date: t.date,
     amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
@@ -251,7 +366,7 @@ function buildActualTxn(t, payeeByName) {
     imported_id: t.imported_id || undefined,
     cleared: true,
     ...(t.category_id ? { category: t.category_id } : {}),
-    ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: t.description }),
+    ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: payeeName }),
   };
   if (Array.isArray(t.splits) && t.splits.length > 1) {
     txn.subtransactions = t.splits.map(s => ({
@@ -330,7 +445,9 @@ app.post('/import', async (req, res) => {
     const payeeByName = new Map(existingPayees.map(p => [p.name.toLowerCase().trim(), p.id]));
     const actualTxns = toImport.map(t => buildActualTxn(t, payeeByName));
 
-    const result = await api.importTransactions(accountId, actualTxns);
+    // Payees are already cleaned by the backend ("GrabFood", "SP Group", "AWS");
+    // stop Actual from title-casing them into "Grabfood" / "Sp Group" / "Aws".
+    const result = await api.importTransactions(accountId, actualTxns, { payeeNameNormalization: 'original' });
     await api.sync();
 
     const skipped = clearlyDup.length + needsVerify.filter(t => verified[t.imported_id] !== 'import').length;
