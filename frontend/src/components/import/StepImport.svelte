@@ -121,7 +121,7 @@
     <div class="ok-body">
       <div class="ok-title">{result.added} transaction{result.added === 1 ? '' : 's'} added to {accountName}</div>
       <div class="muted">
-        {#if result.skipped}{result.skipped} skipped as duplicates. {/if}{#if result.updated}{result.updated} existing rows updated. {/if}{#if rulesCreated}{rulesCreated} category rule{rulesCreated === 1 ? '' : 's'} saved. {/if}Next, check that Actual's balance matches the bank.
+        {#if result.skipped}{result.skipped} skipped as duplicates. {/if}{#if result.updated}{result.updated} existing rows updated. {/if}{#if rulesCreated}{rulesCreated} category rule{rulesCreated === 1 ? '' : 's'} saved, so those payees are categorised automatically next time. {/if}Next, check that Actual's balance matches the bank.
       </div>
       {#if scanNote}<div class="muted">{scanNote} — <button class="linkish" on:click={() => dispatch('openReview')}>review</button></div>{/if}
     </div>

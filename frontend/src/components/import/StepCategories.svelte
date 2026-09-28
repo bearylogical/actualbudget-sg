@@ -60,9 +60,20 @@
             notes: (tx.notes || '').replace(/#llm|#review/g, '').trim() }
         : tx);
   }
-  function accept(ids) {
+  // Skip: looked at, leave as-is for this import only.
+  function skip(ids) {
     const set = new Set(ids);
     transactions = transactions.map((tx) => (set.has(tx.id) ? { ...tx, ack: true } : tx));
+  }
+  // Accept an AI guess: confirmed, so it's saved as a payee rule on import (like a manual pick)
+  // and applies to every row with the same payee.
+  function accept(ids) {
+    const picked = transactions.filter((tx) => ids.includes(tx.id));
+    const keys = new Set(picked.map((t) => `${t.payee}|${t.is_credit}|${t.category}`));
+    transactions = transactions.map((tx) =>
+      ids.includes(tx.id) || (tx.payee && tx.source === 'llm' && keys.has(`${tx.payee}|${tx.is_credit}|${tx.category}`))
+        ? { ...tx, ack: true, confirmed: true }
+        : tx);
   }
 
   function fmtAmt(n) { return n.toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -73,6 +84,7 @@
     return `hsl(${h} 55% 62%)`;
   }
   function srcLabel(t) {
+    if (t.confirmed) return 'AI guess · accepted';
     if (t.source) return SOURCE_LABEL[t.source] + (t.source === 'llm' ? ` ${Math.round(t.confidence * 100)}%` : '');
     if (t.kind === 'transfer') return 'Transfer';
     if (t.kind === 'p2p') return 'PayNow/FAST';
@@ -136,8 +148,8 @@
                 {t.kind === 'transfer' && isUncatName(t.category) ? 'Transfer' : isUncatName(t.category) ? 'Choose…' : t.category}{n && (isGuess(t) || t.unmapped) ? '?' : ''}
               </button>
               {#if n && t.unmapped}<button class="accept" on:click={() => dispatch('openMapper')}>Map</button>
-              {:else if n && isGuess(t)}<button class="accept" on:click={() => accept([t.id])}>Accept</button>
-              {:else if n}<button class="accept quiet" on:click={() => accept([t.id])} title="Import without a category; it stays tagged #review in Actual">Skip</button>{/if}
+              {:else if n && isGuess(t)}<button class="accept" on:click={() => accept([t.id])} title="Use this category and remember it for {t.payee} (when Remember my categories is on)">Accept</button>
+              {:else if n}<button class="accept quiet" on:click={() => skip([t.id])} title="Import without a category; it stays tagged #review in Actual">Skip</button>{/if}
               {#if !n && srcLabel(t)}<span class="src">{srcLabel(t)}</span>{/if}
             {/if}
           </span>

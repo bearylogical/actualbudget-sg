@@ -180,7 +180,9 @@
       });
       const data = await res.json();
       if (res.ok) {
-        transactions = data.transactions.map((t, i) => ({ ...t, id: transactions[i]?.id ?? i, ack: transactions[i]?.ack }));
+        transactions = data.transactions.map((t, i) => ({ ...t, id: transactions[i]?.id ?? i, ack: transactions[i]?.ack,
+          // an accepted guess stays accepted only if the category didn't change underneath it
+          confirmed: transactions[i]?.confirmed && transactions[i]?.category === t.category }));
         catStats = data.stats;
       }
     } catch {} finally { recategorising = false; }
@@ -208,7 +210,7 @@
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
   }
   async function buildPayload(dryRun, verified) {
-    const rows = await Promise.all(importable.map(async ({ ack, ...t }) => ({
+    const rows = await Promise.all(importable.map(async ({ ack, confirmed, ...t }) => ({
       ...t,
       category_id: t.category_id || undefined,
       notes: t.notes || "",
@@ -250,12 +252,12 @@
     } catch {}
     refreshReviewCount();
   }
-  // Manual edits become "payee is X → category" rules in Actual.
+  // Manual edits and accepted AI guesses become "payee is X → category" rules in Actual.
   async function learnFromManualEdits() {
     const seen = new Set();
     const mappings = [];
     for (const t of importable) {
-      if (t.source !== "manual" || !t.category_id || !t.payee || seen.has(t.payee)) continue;
+      if (!(t.source === "manual" || t.confirmed) || !t.category_id || !t.payee || seen.has(t.payee)) continue;
       seen.add(t.payee);
       mappings.push({ description: t.payee, categoryId: t.category_id });
     }
@@ -467,7 +469,7 @@
               disabled={!!importResult} on:click={() => (includeCredits = !includeCredits)}></button>
           </div>
           <div class="opt">
-            <div><div class="o-name">Remember my categories</div><div class="o-sub">Save your changes as Actual rules</div></div>
+            <div><div class="o-name">Remember my categories</div><div class="o-sub">Save your picks and accepted AI guesses as Actual rules</div></div>
             <button class="switch" class:on={learnRules} aria-pressed={learnRules} aria-label="Remember my categories"
               on:click={() => (learnRules = !learnRules)}></button>
           </div>
