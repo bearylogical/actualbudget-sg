@@ -92,7 +92,13 @@ def enrich(transactions: list[dict], ctx: ActualContext | None = None, *,
                 if hit:
                     t.update(category=hit["name"], category_id=hit["id"])
                 else:
-                    t["unmapped"] = True   # seed knows it, but no matching Actual category
+                    # seed knows the merchant but its category has no Actual match (map it in the
+                    # UI to fix for good). Meanwhile let the LLM pick one of YOUR categories so the
+                    # row isn't silently left uncategorised; it stays flagged if the LLM can't.
+                    t.update(unmapped=True, seed_category=seed_cat)
+                    pending_llm.append({"key": str(i), "payee": t["payee"],
+                                        "description": t.get("description", ""),
+                                        "is_credit": bool(t.get("is_credit"))})
             out.append(t)
             continue
 
@@ -122,11 +128,14 @@ def enrich(transactions: list[dict], ctx: ActualContext | None = None, *,
             if not ans:
                 continue
             t = out[int(it["key"])]
+            hit = resolve_category(ans["category"], ctx.categories, aliases) if ctx is not None else None
+            if t.get("unmapped"):
+                if not hit:
+                    continue       # keep the seed guess + unmapped flag
+                t.update(unmapped=False)
             t.update(category=ans["category"], confidence=ans["confidence"], source="llm")
-            if ctx is not None:
-                hit = resolve_category(ans["category"], ctx.categories, aliases)
-                if hit:
-                    t.update(category=hit["name"], category_id=hit["id"])
+            if hit:
+                t.update(category=hit["name"], category_id=hit["id"])
             llm_used += 1
 
     # tags for Actual notes
