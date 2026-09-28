@@ -31,8 +31,8 @@ body {
   font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
-  height: 100vh;
-  overflow: hidden;
+  /* no height/overflow lock here: the import page pins itself to the viewport
+     (.app), other pages such as /money scroll normally */
 }
 
 button {
