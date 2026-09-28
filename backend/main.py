@@ -386,6 +386,16 @@ async def actual_import(body: dict):
     return await _bridge("POST", "/import", body, timeout=60)
 
 
+@app.post("/actual/undo-import")
+async def actual_undo_import(body: dict):
+    """Delete the rows an import just added (ids from its addedIds). Actual keeps deleted
+    imported_ids per account, so re-importing the same file into this account skips them."""
+    ids = [i for i in (body.get("ids") or []) if isinstance(i, str)]
+    if not ids:
+        raise HTTPException(400, "ids required")
+    return await _bridge("POST", "/txns/delete", {"ids": ids}, timeout=60)
+
+
 @app.post("/actual/reset")
 async def actual_reset():
     """Disconnect: also forget the saved connection, so the scheduler stops importing."""

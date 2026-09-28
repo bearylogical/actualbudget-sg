@@ -702,6 +702,7 @@ async function importHandler(req, res) {
       dryRun: false,
       added: result.added?.length ?? 0,
       updated: result.updated?.length ?? 0,
+      addedIds: result.added ?? [],   // lets the UI undo this import
       skipped,
       unreviewed: needsVerify.filter(t => verified[t.imported_id] !== 'import')
         .map(t => ({ date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
