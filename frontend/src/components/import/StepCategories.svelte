@@ -15,10 +15,12 @@
   export let recategorising = false;
   export let catStats = null;
   export let includeCredits = true;
+  export let changedIds = new Set();     // highlighted after a Refresh
+  export let refreshNote = "";
 
   const dispatch = createEventDispatcher();
   const UNCAT = 'Uncategorized';
-  const SOURCE_LABEL = { actual: 'Actual rule', seed: 'Built-in rule', llm: 'AI guess', manual: 'You' };
+  const SOURCE_LABEL = { actual: 'Actual rule', history: 'Your history', seed: 'Built-in rule', llm: 'AI guess', manual: 'You' };
 
   let filter = 'all';                    // 'all' | 'needs'
   let view = 'list';                     // 'list' | 'summary'
@@ -101,6 +103,10 @@
     </div>
   </div>
   <div class="head-r">
+    <button class="ghost sm" on:click={() => dispatch('refresh')} disabled={recategorising}
+      title="Re-read your Actual rules, category mappings and past categorisations, then re-categorise (your own picks are kept)">
+      <Icon name="refresh" size={16} /> {recategorising ? 'Refreshing…' : 'Refresh'}
+    </button>
     {#if unmappedN}<button class="ghost sm" on:click={() => dispatch('openMapper')}>Map {unmappedN} category {unmappedN === 1 ? 'name' : 'names'} to Actual</button>{/if}
     {#if guesses.length}<button class="ghost sm" on:click={() => accept(guesses.map((t) => t.id))}><Icon name="check" size={16} /> Accept {guesses.length} AI {guesses.length === 1 ? 'guess' : 'guesses'}</button>{/if}
   </div>
@@ -120,7 +126,7 @@
     <div class="tbody">
       {#each shown as t (t.id)}
         {@const n = needsOf(t)}
-        <div class="tr" class:needs={n}>
+        <div class="tr" class:needs={n} class:changed={changedIds.has(t.id)}>
           <span class="mono muted">{fmtDate(t.date)}</span>
           <span class="desc">
             <span class="payee">{t.payee || t.description}</span>
@@ -160,7 +166,7 @@
       {/each}
     </div>
   </div>
-  {#if catStats}<div class="muted small">Categorised by {catStats.actual} Actual rules · {catStats.seed} built-in rules · {catStats.llm} AI · {catStats.manual ?? 0} by you</div>{/if}
+  {#if catStats}<div class="muted small">{#if refreshNote}<span class="changed-t">{refreshNote}.</span> {/if}Categorised by {catStats.actual} Actual rules · {catStats.history ?? 0} from your history · {catStats.seed} built-in rules · {catStats.llm} AI · {catStats.manual ?? 0} by you</div>{/if}
 {:else}
   <div class="summary">
     <div class="muted">SGD {fmtAmt(totalSpend)} spent across {spending.length} transactions</div>
@@ -201,6 +207,9 @@
   .tr.needs { background: #1d1910; }
   .tbody .tr:hover { background: var(--surface2); }
   .tr.needs:hover { background: #241f13; }
+  .tr.changed { box-shadow: inset 3px 0 0 var(--accent); animation: flash 1.6s ease-out; }
+  @keyframes flash { from { background: #26244a; } }
+  .changed-t { color: var(--accent); }
   .desc { min-width: 0; display: flex; flex-direction: column; }
   .payee { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .raw { font-size: 12px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

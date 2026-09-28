@@ -9,7 +9,7 @@ class FakeLLM:
         self.answer, self.calls = answer, []
     def status(self):
         return {"enabled": True, "provider": "fake", "model": "fake", "cached_payees": 0}
-    def categorize(self, items, allowed):
+    def categorize(self, items, allowed, category_examples=None):
         self.calls.append((items, allowed))
         return {it["key"]: {"category": self.answer, "confidence": 0.7} for it in items}
 

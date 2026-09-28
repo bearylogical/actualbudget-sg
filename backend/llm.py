@@ -59,6 +59,8 @@ SYSTEM_PROMPT = (
     "transactions. For each transaction choose exactly one allowed category, or null if "
     "you genuinely cannot tell (e.g. a person's name, a generic transfer). Use your "
     "knowledge of Singapore merchants, hawker stalls, chains and abbreviations. "
+    "When the household's own past payees are given (similar_past, typical payees per "
+    "category), follow the household's conventions over generic ones. "
     "Respond with JSON only, no prose."
 )
 
@@ -78,6 +80,7 @@ class LLMCategorizer:
         self.transport = transport
         self.cache_file = cache_file or CACHE_FILE
         self._cache = None
+        self._cat_examples = None
 
     # ── status ────────────────────────────────────────────────────────────────
     @property
@@ -146,11 +149,18 @@ class LLMCategorizer:
         return f"{(payee or '').strip().lower()}|{'cr' if is_credit else 'dr'}"
 
     # ── main entry ────────────────────────────────────────────────────────────
-    def categorize(self, items: list[dict], allowed: list[str]) -> dict[str, dict]:
+    def categorize(self, items: list[dict], allowed: list[str],
+                   category_examples: dict[str, list[str]] | None = None) -> dict[str, dict]:
         """
-        items: [{key, payee, description, is_credit}] — key must be unique.
+        items: [{key, payee, description, is_credit, examples?}] — key must be unique.
+          examples: [{payee, category}] — the household's similar past payees (see history.py).
+        category_examples: {category: [typical payees]} from the household's history.
         returns {key: {"category": name, "confidence": float, "cached": bool}}
+
+        A cached answer is reused only while the examples it was given are unchanged, so
+        a guess made before you categorised similar payees is asked again.
         """
+        self._cat_examples = category_examples or None
         if not self.enabled or not items or not allowed:
             return {}
         allowed_lc = {a.lower(): a for a in allowed}
@@ -159,6 +169,8 @@ class LLMCategorizer:
         for it in items:
             ck = self.cache_key(it["payee"], it.get("is_credit", False))
             hit = self.cache.get(ck)
+            if hit and it.get("examples") is not None and hit.get("ex") != _ex_hash(it):
+                hit = None      # asked before your history had these examples → ask again
             if hit and (hit.get("category") or "").lower() in allowed_lc:
                 results[it["key"]] = {"category": allowed_lc[hit["category"].lower()],
                                       "confidence": hit.get("confidence", self.max_conf), "cached": True}
@@ -183,22 +195,31 @@ class LLMCategorizer:
                     cat = allowed_lc[str(cat).lower()]
                     conf = min(conf, self.max_conf)
                     self.cache[ck] = {"category": cat, "confidence": conf, "model": self.model,
-                                      "ts": int(time.time())}
+                                      "ts": int(time.time()), "ex": _ex_hash(it)}
                     if conf >= self.min_conf:
                         results[it["key"]] = {"category": cat, "confidence": conf, "cached": False}
                 else:
                     self.cache[ck] = {"category": None, "allowed_hash": _hash(allowed),
-                                      "model": self.model, "ts": int(time.time())}
+                                      "model": self.model, "ts": int(time.time()), "ex": _ex_hash(it)}
         self._save_cache()
         return results
 
     # ── transport ─────────────────────────────────────────────────────────────
     def _prompt(self, batch: list[dict], allowed: list[str]) -> str:
-        rows = [{"id": str(n), "payee": it["payee"], "raw": it.get("description", ""),
+        rows = []
+        for n, it in enumerate(batch):
+            r = {"id": str(n), "payee": it["payee"], "raw": it.get("description", ""),
                  "direction": "money in (refund/income)" if it.get("is_credit") else "spend"}
-                for n, it in enumerate(batch)]
+            if it.get("examples"):
+                r["similar_past"] = [f'{e["payee"]} → {e["category"]}' for e in it["examples"]]
+            rows.append(r)
+        typical = ""
+        if getattr(self, "_cat_examples", None):
+            ce = {c: p for c, p in self._cat_examples.items() if c in allowed}
+            typical = ("\n\nTypical payees this household puts in each category:\n" +
+                       json.dumps(ce, ensure_ascii=False))
         return (
-            "Allowed categories:\n" + json.dumps(allowed, ensure_ascii=False) +
+            "Allowed categories:\n" + json.dumps(allowed, ensure_ascii=False) + typical +
             "\n\nTransactions:\n" + json.dumps(rows, ensure_ascii=False) +
             '\n\nReturn: {"results": [{"id": "<id>", "category": "<one allowed category or null>", '
             '"confidence": <0..1>}]}'
@@ -255,6 +276,14 @@ def _clamp(v) -> float:
         return max(0.0, min(1.0, float(v)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _ex_hash(item: dict) -> str | None:
+    ex = item.get("examples")
+    if ex is None:
+        return None
+    import hashlib
+    return hashlib.sha1(json.dumps(ex, sort_keys=True).encode()).hexdigest()[:10]
 
 
 def _hash(allowed: list[str]) -> str:

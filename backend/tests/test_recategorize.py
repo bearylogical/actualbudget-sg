@@ -104,3 +104,56 @@ def test_scan_decide_override_and_bulk_accept(monkeypatch):
     assert r["applied"] == 1
     assert calls[-1] == ("/txns/update", {"updates": [{"id": "t1", "category": "c-tpt"}]})
     assert c.get("/review?kind=recategorize").json()["items"] == []
+
+
+def test_refresh_drops_fixed_updates_changed_and_apply_many_learns(monkeypatch):
+    from fastapi.testclient import TestClient
+    import main
+    calls = []
+    actual = {"t1": row(1, "GRAB* RIDE"), "t2": row(2, "SHOPEE SINGAPORE"), "t3": row(3, "SHOPEE SG"),
+              "t4": row(4, "SHOPEE SG 2")}
+    for k, r in actual.items():
+        r["payee"] = "Shopee" if k != "t1" else "Grab"
+    proposal = {"t1": ("c-tpt", "Transport"), "t2": ("c-food", "Food"), "t3": ("c-food", "Food"),
+                "t4": ("c-food", "Food")}
+
+    def fake_call(method, path, body=None, timeout=120):
+        calls.append((path, body))
+        if path == "/context":
+            return {"categories": CATS, "payees": [], "rules": [], "accounts": []}
+        if path == "/txns/range":
+            return {"transactions": list(actual.values()), "accounts": []}
+        if path == "/txns/update":
+            return {"ok": True, "updated": len(body["updates"]), "errors": []}
+        raise AssertionError(path)
+
+    async def fake_bridge(method, path, body=None, timeout=30):
+        return fake_call(method, path, body)
+
+    monkeypatch.setattr(bridge_client, "call", fake_call)
+    monkeypatch.setattr(main, "_bridge", fake_bridge)
+    monkeypatch.setattr(recategorize, "propose", lambda rows, c, **kw: [
+        {"account": "acc", "txn": r, "current": {"id": r.get("category"), "name": None},
+         "proposed": {"id": proposal[r["id"]][0], "name": proposal[r["id"]][1], "source": "seed", "confidence": 0.9},
+         "reason": "x"} for r in rows if not r.get("category")])
+    c = TestClient(main.app)
+    assert c.post("/review/recategorize/scan", json={"days": 30}).json()["queued"] == 4
+
+    # meanwhile: t1 categorised by hand in Actual; the best idea for Shopee became Salary
+    actual["t1"] = {**actual["t1"], "category": "c-tpt"}
+    for k in ("t2", "t3", "t4"):
+        proposal[k] = ("c-sal", "Salary")
+    r = c.post("/review/recategorize/refresh", json={}).json()
+    assert (r["fixed_elsewhere"], r["changed"], r["auto_applied"], r["pending"]) == (1, 3, 0, 3)
+    items = c.get("/review?kind=recategorize").json()["items"]
+    assert {i["payload"]["proposed"]["id"] for i in items} == {"c-sal"}
+
+    # approve two Shopee rows at once with a different category → learned (LEARN_AFTER=2) …
+    ids = [i["id"] for i in items if i["payload"]["txn"]["id"] in ("t2", "t3")]
+    r = c.post("/review/recategorize/apply-many", json={"ids": ids, "category_id": "c-food"}).json()
+    assert r["applied"] == 2 and calls[-1][0] == "/txns/update"
+    # … but t4 is still proposed as Salary, so the pattern (Shopee → Food) doesn't match it;
+    # a refresh that now proposes Food for it applies it on its own.
+    proposal["t4"] = ("c-food", "Food")
+    r = c.post("/review/recategorize/refresh", json={}).json()
+    assert r["auto_applied"] == 1 and r["pending"] == 0

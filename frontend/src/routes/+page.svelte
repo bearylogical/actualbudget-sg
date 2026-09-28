@@ -169,16 +169,26 @@
   $: ctxKey = `${actualBudgetLoaded}|${accountId}|${actualRules.length}|${actualCats.length}|${useLLM}`;
   let lastCtxKey = "";
   $: if (transactions.length && ctxKey !== lastCtxKey) recategorise();
-  async function recategorise() {
+  let changedIds = new Set();   // rows whose category changed on the last Refresh
+  let refreshNote = "";
+  async function recategorise(refresh = false) {
     lastCtxKey = ctxKey;
     if (!transactions.length) return;
     recategorising = true;
+    const before = new Map(transactions.map((t) => [t.id, t.category_id || t.category]));
     try {
       const res = await fetch(`${API}/categorize`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactions, account_id: accountId || null, use_llm: useLLM && aiAvailable }),
+        body: JSON.stringify({ transactions, account_id: accountId || null, use_llm: useLLM && aiAvailable, refresh }),
       });
       const data = await res.json();
+      if (res.ok && refresh) {
+        changedIds = new Set(data.transactions
+          .map((t, i) => [transactions[i]?.id ?? i, t.category_id || t.category])
+          .filter(([id, c]) => before.get(id) !== c).map(([id]) => id));
+        refreshNote = `${changedIds.size} ${changedIds.size === 1 ? "category" : "categories"} changed` +
+          (data.history_size ? ` · learned from ${data.history_size} of your past transactions` : "");
+      }
       if (res.ok) {
         transactions = data.transactions.map((t, i) => ({ ...t, id: transactions[i]?.id ?? i, ack: transactions[i]?.ack,
           // an accepted guess stays accepted only if the category didn't change underneath it
@@ -186,6 +196,12 @@
         catStats = data.stats;
       }
     } catch {} finally { recategorising = false; }
+  }
+
+  // Refresh: pick up rules, mappings and history you've added since this statement was read.
+  async function refreshAll() {
+    await refreshCategories();
+    await recategorise(true);
   }
 
   async function refreshCategories() {
@@ -213,7 +229,8 @@
     const rows = await Promise.all(importable.map(async ({ ack, confirmed, ...t }) => ({
       ...t,
       category_id: t.category_id || undefined,
-      notes: t.notes || "",
+      // an accepted AI guess is your choice now: drop #llm so it counts as your history
+      notes: (confirmed ? (t.notes || "").replace(/#llm/g, "").trim() : t.notes) || "",
       legacy_ids: [...(t.legacy_ids || []), legacyStmtId(t), await legacyHash(t)],
     })));
     const payload = { accountId, dryRun, verified, transactions: rows };
@@ -409,6 +426,9 @@
             {recategorising}
             {catStats}
             {includeCredits}
+            {changedIds}
+            {refreshNote}
+            on:refresh={refreshAll}
             on:openMapper={() => (showMapper = true)}
             on:export={(e) => exportCSV(e.detail)}
             on:back={() => (step = 1)}
