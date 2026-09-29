@@ -22,6 +22,7 @@ from actual_rules import ActualContext
 from parsers import parse_statement, SUPPORTED_EXTENSIONS
 import accounts as acct
 from pipeline import enrich
+import history
 import review
 import reconcile
 import bridge_client
@@ -258,7 +259,8 @@ def process_file(path: Path):
         if conflict:
             raise ValueError(f"Refusing to import into '{account_name}': {conflict}")
         use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true"
-        enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm)
+        enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm,
+                          history=history.get(ctx))
         s = enriched["stats"]
         log.info(f"  Categorised: actual={s['actual']} seed={s['seed']} llm={s['llm']} "
                  f"transfer={s['transfer']} review={s['review']} unmapped={s['unmapped']}")

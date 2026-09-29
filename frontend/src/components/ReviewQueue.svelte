@@ -21,6 +21,8 @@
   let kindFilter = '';          // '' = all kinds
   let categoryGroups = [];      // for overriding a proposed category
   let override = {};            // item id → category id picked instead of the proposal
+  let nudge = null;             // { payee, category, categoryId, ids } after approving a category fix
+  const normPayee = (t) => (t.payee || t.imported_payee || '').trim().toLowerCase();
 
   const KIND = {
     import_duplicate: 'Possible duplicate at import',
@@ -78,6 +80,13 @@
       if (r.applied && !r.applied.ok) error = `Applied with errors: ${r.applied.errors.join('; ')}`;
       dispatch('changed');
       await load();
+      // offer to apply the same category to the other waiting rows for this payee
+      if (it.kind === 'recategorize' && decision === 'apply' && r.status === 'done') {
+        const p = normPayee(it.payload.txn);
+        const others = items.filter(i => i.kind === 'recategorize' && i.status === 'pending' && normPayee(i.payload.txn) === p);
+        nudge = others.length ? { payee: it.payload.txn.payee || it.payload.txn.imported_payee,
+          category: r.payload.proposed.name, categoryId: r.payload.proposed.id, ids: others.map(i => i.id) } : null;
+      }
     } catch (e) { error = e.message; }
     finally { busy = { ...busy, [it.id]: false }; }
   }
@@ -87,6 +96,28 @@
     try {
       const r = await post('/review/scan', { days: 120 });
       note = `Scan: ${r.queued} new item(s)` + (r.auto_applied ? `, ${r.auto_applied} resolved from what you taught it` : '');
+      dispatch('changed');
+    } catch (e) { error = e.message; }
+    await load();
+  }
+  async function applyNudge() {
+    const n = nudge; nudge = null; loading = true; error = '';
+    try {
+      const r = await post('/review/recategorize/apply-many', { ids: n.ids, category_id: n.categoryId });
+      note = `Applied ${n.category} to ${r.applied} more “${n.payee}” transaction(s)` + (r.failed.length ? ` · ${r.failed.length} failed` : '');
+      dispatch('changed');
+    } catch (e) { error = e.message; }
+    await load();
+  }
+  async function refreshSuggestions() {
+    loading = true; note = ''; error = ''; nudge = null;
+    try {
+      const r = await post('/review/recategorize/refresh', { use_llm: true });
+      const bits = [];
+      if (r.changed) bits.push(`${r.changed} updated`);
+      if (r.fixed_elsewhere) bits.push(`${r.fixed_elsewhere} already fixed in Actual`);
+      if (r.auto_applied) bits.push(`${r.auto_applied} applied from what you taught it`);
+      note = `Refreshed ${r.checked} category fix(es)` + (bits.length ? `: ${bits.join(', ')}` : ': nothing changed');
       dispatch('changed');
     } catch (e) { error = e.message; }
     await load();
@@ -161,6 +192,8 @@
       <div class="bar">
         <button class="ghost small" on:click={scan} disabled={loading}>🔎 Scan Actual (120 days)</button>
         <button class="ghost small" on:click={scanCategories} disabled={loading}>🏷 Fix categories (120 days)</button>
+        <button class="ghost small" on:click={refreshSuggestions} disabled={loading || !items.some(i => i.kind === 'recategorize')}
+          title="Re-check waiting category fixes against your latest rules, mappings and history">↻ Refresh suggestions</button>
         <button class="ghost small" on:click={advise} disabled={loading || !items.some(i => i.kind !== 'recategorize')}>🤖 Ask AI</button>
         <button class="ghost small" on:click={acceptAI} disabled={loading || !aiCount}>✓ Accept suggestions ≥80%</button>
         {#if kinds.length > 1}
@@ -174,6 +207,13 @@
       </div>
     {/if}
     {#if error}<div class="error-msg">{error}</div>{/if}
+    {#if nudge}
+      <div class="nudge">
+        <span>Apply <strong>{nudge.category}</strong> to the {nudge.ids.length} other “{nudge.payee}” transaction{nudge.ids.length > 1 ? 's' : ''} waiting?</span>
+        <button class="primary small" on:click={applyNudge} disabled={loading}>Apply to {nudge.ids.length}</button>
+        <button class="ghost small" on:click={() => (nudge = null)}>Not now</button>
+      </div>
+    {/if}
 
     <div class="list">
       {#if tab === 'memory'}
@@ -280,4 +320,5 @@
   .muted { color: var(--text2); font-size: 12px; }
   .mem { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
   .mem span:first-child { flex: 1; }
+  .nudge { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0; padding: 10px 14px; border-radius: 10px; background: #1b1a33; border: 1px solid var(--accent); font-size: 13px; }
 </style>

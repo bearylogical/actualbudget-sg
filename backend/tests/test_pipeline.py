@@ -9,7 +9,7 @@ class FakeLLM:
         self.answer, self.calls = answer, []
     def status(self):
         return {"enabled": True, "provider": "fake", "model": "fake", "cached_payees": 0}
-    def categorize(self, items, allowed):
+    def categorize(self, items, allowed, category_examples=None):
         self.calls.append((items, allowed))
         return {it["key"]: {"category": self.answer, "confidence": 0.7} for it in items}
 
@@ -83,3 +83,16 @@ def test_existing_raw_payee_is_reused_until_merged():
     ctx.payees.append({"id": "p-clean", "name": "Ya Kun Kaya Toast"}); ctx.__post_init__()
     t = enrich([row("YA KUN KAYA TOAST - T3")], ctx, use_llm=False)["transactions"][0]
     assert t["payee"] == "Ya Kun Kaya Toast"
+
+
+def test_unmapped_seed_falls_back_to_llm():
+    # Netflix → seed "Subscriptions", which this budget doesn't have: ask the LLM for one of ours
+    llm = FakeLLM("Misc")
+    t = enrich([row("NETFLIX.COM")], CTX, llm=llm)["transactions"][0]
+    assert (t["source"], t["category_id"], t["unmapped"]) == ("llm", "c-misc", False)
+    assert t["seed_category"] == "Subscriptions" and len(llm.calls) == 1
+
+
+def test_unmapped_seed_stays_flagged_when_llm_cannot_resolve():
+    t = enrich([row("NETFLIX.COM")], CTX, llm=FakeLLM("Not A Category"))["transactions"][0]
+    assert (t["source"], t["category_id"], t["unmapped"], t["category"]) == ("seed", None, True, "Subscriptions")

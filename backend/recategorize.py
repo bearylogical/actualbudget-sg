@@ -36,7 +36,7 @@ def candidates(rows: list[dict]) -> list[dict]:
 
 
 def propose(rows: list[dict], ctx: ActualContext, *, mode: str = "uncategorised",
-            use_llm: bool = True, llm=None) -> list[dict]:
+            use_llm: bool = True, llm=None, history=None) -> list[dict]:
     """→ [{txn, current, proposed, reason}] for rows whose category should change."""
     cands = candidates(rows)
     by_acct: dict[str, list[dict]] = {}
@@ -51,10 +51,10 @@ def propose(rows: list[dict], ctx: ActualContext, *, mode: str = "uncategorised"
         results = []
         if unc:
             results += zip(unc, enrich([_to_parsed(t) for t in unc], ctx, account_id=account_id,
-                                       use_llm=use_llm, llm=llm)["transactions"])
+                                       use_llm=use_llm, llm=llm, history=history)["transactions"])
         if cat:
             results += zip(cat, enrich([_to_parsed(t) for t in cat], ctx, account_id=account_id,
-                                       use_llm=False, llm=llm)["transactions"])
+                                       use_llm=False, llm=llm, history=history)["transactions"])
         for t, e in results:
             new_id = e.get("category_id")
             if not new_id or new_id == t.get("category") or e.get("kind") in ("transfer", "p2p"):
@@ -65,6 +65,7 @@ def propose(rows: list[dict], ctx: ActualContext, *, mode: str = "uncategorised"
             cur = ctx.cat_by_id.get(t.get("category")) or {}
             src = e["source"]
             why = {"actual": "one of your Actual rules matches",
+                   "history": f"you've categorised this payee this way {e.get('history_times', 'several')}×",
                    "seed": "known merchant",
                    "llm": "AI guess from the payee"}.get(src, src)
             if t.get("category"):

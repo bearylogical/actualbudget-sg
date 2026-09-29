@@ -124,7 +124,7 @@ def enqueue(kind: str, payload: dict, key_parts: list) -> dict:
     now = time.time()
     with db() as con:
         row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-        if row:
+        if row and row["status"] != "superseded":
             return _row(row)
         remembered = con.execute("SELECT * FROM memory WHERE key=?", (f"pair|{iid}",)).fetchone()
         learned = con.execute("SELECT * FROM memory WHERE key=? AND count>=?", (pattern, LEARN_AFTER)).fetchone()
@@ -133,9 +133,14 @@ def enqueue(kind: str, payload: dict, key_parts: list) -> dict:
             status, decision, by = "auto", remembered["decision"], "remembered"
         elif learned:
             status, decision, by = "auto", learned["decision"], f"learned: {learned['label']} ×{learned['count']}"
-        con.execute("INSERT INTO items(id,kind,status,pattern,payload,decision,decided_by,created,updated) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (iid, kind, status, pattern, json.dumps(payload, default=str), decision, by, now, now))
+        if row:    # superseded earlier (e.g. a refresh flip-flopped) and now proposed again
+            con.execute("UPDATE items SET status=?, pattern=?, payload=?, decision=?, decided_by=?, "
+                        "result=NULL, updated=? WHERE id=?",
+                        (status, pattern, json.dumps(payload, default=str), decision, by, now, iid))
+        else:
+            con.execute("INSERT INTO items(id,kind,status,pattern,payload,decision,decided_by,created,updated) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (iid, kind, status, pattern, json.dumps(payload, default=str), decision, by, now, now))
         return _row(con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone())
 
 
@@ -246,6 +251,27 @@ def supersede(ids: set[str], except_id: str | None = None) -> int:
                 con.execute("UPDATE items SET status='superseded', updated=? WHERE id=?", (time.time(), r["id"]))
                 n += 1
     return n
+
+
+def set_status(iid: str, status: str):
+    with db() as con:
+        con.execute("UPDATE items SET status=?, updated=? WHERE id=?", (status, time.time(), iid))
+
+
+def promote_learned(kind: str | None = None) -> list[dict]:
+    """Pending items whose pattern has since been learned (≥ LEARN_AFTER identical decisions)
+    become 'auto' with that decision — so what you taught applies to what's already queued."""
+    out = []
+    with db() as con:
+        q = "SELECT i.id, m.decision, m.label, m.count FROM items i JOIN memory m ON m.key = i.pattern " \
+            "WHERE i.status='pending' AND m.count >= ?" + (" AND i.kind=?" if kind else "")
+        rows = con.execute(q, (LEARN_AFTER, kind) if kind else (LEARN_AFTER,)).fetchall()
+        for r in rows:
+            con.execute("UPDATE items SET status='auto', decision=?, decided_by=?, updated=? WHERE id=?",
+                        (r["decision"], f"learned: {r['label']} ×{r['count']}", time.time(), r["id"]))
+    for r in rows:
+        out.append(get(r["id"]))
+    return out
 
 
 def dismiss(iid: str):

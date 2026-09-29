@@ -272,7 +272,9 @@ propose_fix for each change needed so Actual matches the bank EXACTLY. Rules:
 - Duplicates, missing rows and unlinked transfers come before an opening-balance adjustment;
   use an adjustment only for the balance before the statement starts, or a clearly explained remainder.
 - Nothing you propose is applied until the user approves it.
-Finish with a short plain-English explanation: gap, cause(s), proposals, anything left unexplained."""
+Finish with a short plain-English explanation (at most 3 sentences, no markdown, no headings):
+gap, cause(s), proposals, anything left unexplained. Tool amounts are in cents; always write money
+in dollars, e.g. S$5,200.00, never in cents."""
 
 
 def agent_tools(report: dict, statement_rows: list[dict], extra_rows: list[dict]) -> tuple[list[dict], dict, list]:

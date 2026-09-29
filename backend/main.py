@@ -10,6 +10,7 @@ from parsers import parse_bytes, parse_statement as parse_statement_bytes, SUPPO
 import accounts as acct
 from actual_rules import ActualContext
 from pipeline import enrich
+import history
 from llm import LLMCategorizer
 from rules_audit import audit, to_markdown
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
@@ -84,8 +85,9 @@ async def parse_statement(
     # an explicit choice wins; otherwise use a confident recommendation so account-scoped
     # Actual rules are previewed correctly
     use_account = account_id or (account["recommended"] if account.get("auto_select") else None)
+    hist = await run_in_threadpool(history.get, ctx)
     result = await run_in_threadpool(
-        enrich, transactions, ctx, account_id=use_account, use_llm=use_llm
+        enrich, transactions, ctx, account_id=use_account, use_llm=use_llm, history=hist
     )
     return {
         **result,
@@ -141,16 +143,20 @@ async def accounts_forget(body: dict):
 
 @app.post("/categorize")
 async def categorize_transactions(body: dict):
-    """Re-run categorisation, e.g. after connecting to Actual or changing aliases."""
+    """Re-run categorisation, e.g. after connecting to Actual or changing aliases.
+    {refresh: true} rebuilds your category history from Actual first (the Refresh button)."""
     ctx = await get_context()
+    hist = await run_in_threadpool(history.get, ctx, bool(body.get("refresh")))
     result = await run_in_threadpool(
         enrich,
         body.get("transactions", []),
         ctx,
         account_id=body.get("account_id") or None,
         use_llm=body.get("use_llm", True),
+        history=hist,
     )
-    return {**result, "actual_connected": ctx is not None}
+    return {**result, "actual_connected": ctx is not None,
+            "history_size": len(hist) if hist is not None else 0}
 
 
 @app.get("/taxonomy")
@@ -386,6 +392,16 @@ async def actual_import(body: dict):
     return await _bridge("POST", "/import", body, timeout=60)
 
 
+@app.post("/actual/undo-import")
+async def actual_undo_import(body: dict):
+    """Delete the rows an import just added (ids from its addedIds). Actual keeps deleted
+    imported_ids per account, so re-importing the same file into this account skips them."""
+    ids = [i for i in (body.get("ids") or []) if isinstance(i, str)]
+    if not ids:
+        raise HTTPException(400, "ids required")
+    return await _bridge("POST", "/txns/delete", {"ids": ids}, timeout=60)
+
+
 @app.post("/actual/reset")
 async def actual_reset():
     """Disconnect: also forget the saved connection, so the scheduler stops importing."""
@@ -453,7 +469,8 @@ def recategorize_scan(start: str, end: str, mode: str = "uncategorised", use_llm
     import recategorize
     ctx = ActualContext.from_bridge(bridge_client.call("GET", "/context", timeout=60))
     rows, _ = bridge_client.txns(start, end, account_ids)
-    proposals = recategorize.propose(rows, ctx, mode=mode, use_llm=use_llm)
+    hist = history.get(ctx, refresh=True)
+    proposals = recategorize.propose(rows, ctx, mode=mode, use_llm=use_llm, history=hist)
     queued, auto = [], []
     for p in proposals:
         it = review.enqueue("recategorize", p, [p["txn"]["id"], p["proposed"]["id"]])
@@ -535,12 +552,7 @@ async def review_decide(item_id: str, body: dict):
         if it["kind"] != "recategorize":
             raise HTTPException(400, "category_id only applies to recategorize items")
         ctx = ActualContext.from_bridge(await _bridge("GET", "/context"))
-        cat = ctx.cat_by_id.get(body["category_id"])
-        if not cat:
-            raise HTTPException(400, "unknown category_id")
-        it["payload"]["proposed"] = {**it["payload"]["proposed"], "id": cat["id"], "name": cat["name"],
-                                     "group": cat.get("group_name"), "source": "manual", "confidence": 1.0}
-        review.set_payload(item_id, it["payload"])
+        _override_category(it, ctx, body["category_id"])
     try:
         item = review.decide(item_id, body.get("decision", ""), by="you")
     except KeyError:
@@ -548,6 +560,86 @@ async def review_decide(item_id: str, body: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return await run_in_threadpool(_apply, item)
+
+
+def _override_category(it: dict, ctx: ActualContext, category_id: str):
+    cat = ctx.cat_by_id.get(category_id)
+    if not cat:
+        raise HTTPException(400, "unknown category_id")
+    it["payload"]["proposed"] = {**it["payload"]["proposed"], "id": cat["id"], "name": cat["name"],
+                                 "group": cat.get("group_name"), "source": "manual", "confidence": 1.0}
+    review.set_payload(it["id"], it["payload"])
+
+
+@app.post("/review/recategorize/apply-many")
+async def review_recategorize_apply_many(body: dict):
+    """{ids, category_id?} — approve several category fixes at once (e.g. every waiting row for
+    one payee), optionally with a different category. Each counts as your decision, so the
+    payee → category pattern is learned. Applied to Actual in one call."""
+    ids = body.get("ids") or []
+    ctx = ActualContext.from_bridge(await _bridge("GET", "/context")) if body.get("category_id") else None
+    decided = []
+    for iid in ids:
+        it = review.get(iid)
+        if not it or it["kind"] != "recategorize" or it["status"] != "pending":
+            continue
+        if ctx is not None:
+            _override_category(it, ctx, body["category_id"])
+        decided.append(review.decide(iid, "apply", by="you"))
+    done = await run_in_threadpool(_apply_recategorize, decided)
+    failed = [review.get(it["id"]) for it in done]
+    return {"applied": sum(1 for it in failed if it and it["status"] == "done"),
+            "failed": [it["id"] for it in failed if it and it["status"] == "failed"]}
+
+
+def recategorize_refresh(use_llm: bool = True) -> dict:
+    """Re-check waiting category fixes against what you've taught since they were queued:
+    drop ones you've fixed in Actual meanwhile, update ones whose best category changed
+    (your rules, mappings or history), and apply ones matching a pattern you've now approved
+    enough times. Nothing else is written to Actual."""
+    import recategorize
+    pending = review.list_items("pending", "recategorize", limit=5000)
+    fixed_elsewhere = changed = 0
+    if pending:
+        ctx = ActualContext.from_bridge(bridge_client.call("GET", "/context", timeout=60))
+        hist = history.get(ctx, refresh=True)
+        dates = sorted(it["payload"]["txn"]["date"] for it in pending)
+        rows, _ = bridge_client.txns(dates[0], dates[-1])
+        by_id = {r["id"]: r for r in rows}
+        still = []
+        for it in pending:
+            t = it["payload"]["txn"]
+            r = by_id.get(t["id"])
+            if r is None or r.get("category") != (it["payload"]["current"] or {}).get("id"):
+                review.set_status(it["id"], "superseded")    # deleted, or categorised in Actual
+                fixed_elsewhere += 1
+            else:
+                still.append((it, r))
+        props = {p["txn"]["id"]: p for p in
+                 recategorize.propose([r for _, r in still], ctx, use_llm=use_llm, history=hist)}
+        for it, r in still:
+            p = props.get(r["id"])
+            if not p:
+                continue            # no better idea now; keep the suggestion you already have
+            if p["proposed"]["id"] != it["payload"]["proposed"]["id"]:
+                review.set_status(it["id"], "superseded")
+                review.enqueue("recategorize", p, [p["txn"]["id"], p["proposed"]["id"]])
+                changed += 1
+            elif p["proposed"] != it["payload"]["proposed"]:
+                review.set_payload(it["id"], p)             # same category, fresher reason/confidence
+    review.promote_learned("recategorize")
+    auto = [it for it in review.list_items("auto", "recategorize", limit=5000)]
+    applied = _apply_recategorize(auto)
+    return {"checked": len(pending), "fixed_elsewhere": fixed_elsewhere, "changed": changed,
+            "auto_applied": len(applied), "pending": review.counts().get("recategorize", {}).get("pending", 0)}
+
+
+@app.post("/review/recategorize/refresh")
+async def review_recategorize_refresh(body: dict | None = None):
+    try:
+        return await run_in_threadpool(recategorize_refresh, (body or {}).get("use_llm", True))
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
 
 
 @app.post("/review/{item_id}/dismiss")
