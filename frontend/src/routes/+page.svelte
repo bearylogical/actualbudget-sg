@@ -1,7 +1,12 @@
 <!--
+  App shell: the top nav switches what fills the page (Import · Review · Rules ·
+  History · Money), addressed by the URL hash so tabs are linkable.
+
   Import flow: Statement → Categories → Import → Reconcile.
   One step on screen at a time, one primary action per step; the destination
   account is chosen per statement (never carried over from a previous import).
+  It stays mounted while another tab is showing, so switching away mid-import
+  keeps the statement.
 -->
 <script>
   import "../app.css";
@@ -11,6 +16,8 @@
   import RulesAudit from "../components/RulesAudit.svelte";
   import HealthStatus from "../components/HealthStatus.svelte";
   import ReviewQueue from "../components/ReviewQueue.svelte";
+  import HistoryView from "../components/HistoryView.svelte";
+  import MoneyView from "../components/MoneyView.svelte";
   import Icon from "../components/Icon.svelte";
   import StepStatement from "../components/import/StepStatement.svelte";
   import StepCategories from "../components/import/StepCategories.svelte";
@@ -71,10 +78,23 @@
   let scanNote = "";
   let undoneAccountId = ""; // after an undo, re-importing here may restore the deleted rows
 
-  // ── Modals ────────────────────────────────────────────────────────────────────
+  // ── Tabs ──────────────────────────────────────────────────────────────────────
+  const TABS = [
+    { id: "import", label: "Import" },
+    { id: "review", label: "Review", needsActual: true, title: "Possible duplicates, unlinked transfers and reconciliation fixes waiting for you" },
+    { id: "rules", label: "Rules", needsActual: true, title: "Audit and sync your Actual rules" },
+    { id: "history", label: "History", title: "Every statement uploaded here or dropped in the watch folder" },
+    { id: "money", label: "Money" },
+  ];
+  let view = "import";
+  function readHash() {
+    const h = location.hash.slice(1);
+    view = TABS.some((t) => t.id === h) ? h : "import";
+  }
+  $: tab = TABS.find((t) => t.id === view);
+  $: if (view === "review") refreshReviewCount();
+
   let showMapper = false;
-  let showAudit = false;
-  let showReview = false;
   let reviewPending = 0;
   let showConn = false;
 
@@ -82,6 +102,7 @@
     try { reviewPending = (await (await fetch(`${API}/review/counts`)).json()).pending || 0; } catch {}
   }
   onMount(() => {
+    readHash();
     refreshReviewCount();
     const t = setInterval(refreshReviewCount, 60000);
     (async () => {
@@ -318,16 +339,13 @@
     { n: 4, label: "Reconcile", sub: reached >= 4 ? "Check balance" : "After import" },
   ];
   $: status = importResult ? "Imported" : transactions.length ? "Not imported" : "—";
+  const goReview = () => (location.hash = "review");
   function fmtDay(d) { return d ? new Date(d).toLocaleDateString("en-SG", { day: "numeric", month: "short" }) : ""; }
 </script>
 
-{#if showReview}
-  <ReviewQueue
-    on:close={() => { showReview = false; refreshReviewCount(); }}
-    on:changed={refreshReviewCount}
-    on:counts={(e) => (reviewPending = e.detail.pending || 0)}
-  />
-{/if}
+<svelte:window on:hashchange={readHash} />
+<svelte:head><title>{tab.id === "import" ? "Budget Parser" : `${tab.label} · Budget Parser`}</title></svelte:head>
+
 {#if showMapper}
   <CategoryMapper
     transactions={transactions.filter((t) => t.unmapped)}
@@ -336,26 +354,17 @@
     on:close={() => (showMapper = false)}
   />
 {/if}
-{#if showAudit}
-  <RulesAudit
-    sampleDescriptions={transactions.map((t) => t.description)}
-    on:applied={async () => { await refreshCategories(); lastCtxKey = ""; }}
-    on:close={() => (showAudit = false)}
-  />
-{/if}
 
 <div class="app">
   <header class="topbar">
     <div class="brand"><span class="brand-icon"><Icon name="card" size={22} /></span>Budget Parser</div>
     <nav aria-label="Main">
-      <button class="tab on" aria-current="page">Import</button>
-      <button class="tab" disabled={!actualBudgetLoaded} on:click={() => (showReview = true)}
-        title="Possible duplicates, unlinked transfers and reconciliation fixes waiting for you">
-        Review{#if reviewPending}<span class="count">{reviewPending}</span>{/if}
-      </button>
-      <button class="tab" disabled={!actualBudgetLoaded} on:click={() => (showAudit = true)} title="Audit and sync your Actual rules">Rules</button>
-      <a class="tab" href="/history" title="Every statement uploaded here or dropped in the watch folder">History</a>
-      <a class="tab" href="/money">Money</a>
+      {#each TABS as t}
+        <a class="tab" class:on={view === t.id} href="#{t.id}" title={t.title}
+          aria-current={view === t.id ? "page" : undefined}>
+          {t.label}{#if t.id === "review" && reviewPending}<span class="count">{reviewPending}</span>{/if}
+        </a>
+      {/each}
     </nav>
     <div class="top-r">
       {#if actualBudgetLoaded}
@@ -375,8 +384,8 @@
     </div>
   </header>
 
-  <!-- connection card: visible until a budget is loaded; stays mounted to keep the session -->
-  <div class="connect" class:hidden={actualBudgetLoaded}>
+  <!-- connection card: shown on tabs that need Actual until a budget is loaded; stays mounted to keep the session -->
+  <div class="connect" class:hidden={actualBudgetLoaded || !(view === "import" || tab.needsActual)}>
     <ActualSidebar
       bind:this={actual}
       bind:connected={actualConnected}
@@ -390,7 +399,7 @@
   </div>
 
   {#if actualBudgetLoaded}
-    <div class="body">
+    <div class="body" class:hidden={view !== "import"}>
       <aside class="stepper" aria-label="Import steps">
         <div class="eyebrow" style="padding:0 14px 10px">New import</div>
         {#each steps as s}
@@ -455,7 +464,7 @@
             bind:result={importResult}
             on:imported={afterImport}
             on:undone={afterUndo}
-            on:openReview={() => (showReview = true)}
+            on:openReview={goReview}
             on:back={() => (step = 2)}
             on:continue={() => go(4)}
             on:new={startOver}
@@ -469,7 +478,7 @@
             {uploadId}
             {aiAvailable}
             on:queued={refreshReviewCount}
-            on:openReview={() => (showReview = true)}
+            on:openReview={goReview}
             on:back={() => (step = 3)}
             on:new={startOver}
           />
@@ -512,6 +521,28 @@
       </aside>
     </div>
   {/if}
+
+  {#if view !== "import" && (actualBudgetLoaded || !tab.needsActual)}
+    <main class="page">
+      <div class="page-inner">
+        {#if view === "review"}
+          <ReviewQueue
+            on:changed={refreshReviewCount}
+            on:counts={(e) => (reviewPending = e.detail.pending || 0)}
+          />
+        {:else if view === "rules"}
+          <RulesAudit
+            sampleDescriptions={transactions.map((t) => t.description)}
+            on:applied={async () => { await refreshCategories(); lastCtxKey = ""; }}
+          />
+        {:else if view === "history"}
+          <HistoryView />
+        {:else if view === "money"}
+          <MoneyView />
+        {/if}
+      </div>
+    </main>
+  {/if}
 </div>
 
 <style>
@@ -522,9 +553,8 @@
   .brand-icon { color: var(--accent); display: inline-flex; }
   nav { display: flex; align-items: center; margin-left: 16px; }
   .tab { background: none; border: 0; border-radius: 0; color: var(--text2); font-size: 14px; font-weight: 500; padding: 0 14px; height: 64px; border-bottom: 2px solid transparent; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
-  .tab:hover:not(:disabled) { color: var(--text); }
+  .tab:hover { color: var(--text); }
   .tab.on { color: var(--text); border-bottom-color: var(--accent); }
-  .tab:disabled { opacity: .45; cursor: not-allowed; }
   .count { background: var(--warn-bg); color: var(--warn); border-radius: 10px; font-size: 12px; padding: 0 7px; font-weight: 600; }
   .top-r { margin-left: auto; display: flex; align-items: center; gap: 12px; }
   .conn { position: relative; }
@@ -537,6 +567,10 @@
   .connect.hidden { display: none; }
 
   .body { flex: 1; min-height: 0; display: flex; gap: 32px; padding: 32px; }
+  .body.hidden { display: none; }
+
+  .page { flex: 1; min-height: 0; overflow-y: auto; padding: 32px; }
+  .page-inner { max-width: 1200px; margin: 0 auto; }
   .stepper { width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; }
   .step { justify-content: flex-start; align-items: flex-start; gap: 14px; padding: 12px 14px; border-radius: 10px; background: none; text-align: left; width: 100%; color: var(--text); }
   .step:hover:not(:disabled) { background: var(--surface); }
@@ -568,5 +602,6 @@
     .step { width: auto; }
     .side { width: auto; }
     .stage { padding: 20px; overflow: visible; }
+    .page { padding: 16px; }
   }
 </style>

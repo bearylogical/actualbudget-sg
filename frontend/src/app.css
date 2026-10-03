@@ -109,3 +109,9 @@ button.linkish { background: none; border: 0; padding: 0; color: var(--accent); 
 .switch.on { background: var(--accent-fill); }
 .switch.on::after { left: 19px; background: #fff; }
 .switch:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── page header shared by every top-level tab ── */
+.view-head { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.view-head h1 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+.view-head .sub { font-size: 14px; margin-top: 4px; }
+.view-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }

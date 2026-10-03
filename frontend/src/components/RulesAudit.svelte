@@ -68,14 +68,16 @@
   $: s = report?.summary;
 </script>
 
-<!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-<div class="overlay" on:click|self={() => dispatch('close')}>
-  <div class="modal">
-    <div class="modal-header">
-      <h3>🧹 Actual rules audit</h3>
-      {#if markdown}<button class="ghost icon-btn" on:click={downloadMd}>⬇ Report</button>{/if}
-      <button class="ghost icon-btn" on:click={load} disabled={loading}>↻</button>
-      <button class="ghost icon-btn" on:click={() => dispatch('close')}>✕</button>
+<div class="view">
+    <div class="view-head">
+      <div>
+        <h1>Rules</h1>
+        <p class="muted sub">Audit your Actual rules and payees, then sync fixes back.</p>
+      </div>
+      <div class="view-actions">
+        {#if markdown}<button class="ghost icon-btn" on:click={downloadMd}>⬇ Report</button>{/if}
+        <button class="ghost icon-btn" on:click={load} disabled={loading} aria-label="Refresh">↻</button>
+      </div>
     </div>
 
     {#if error}<div class="error-msg">{error}</div>{/if}
@@ -167,15 +169,11 @@
         </button>
       </div>
     {/if}
-  </div>
 </div>
 
 <style>
-  .overlay { position: fixed; inset: 0; background: #00000088; display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; width: 820px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; gap: 12px; padding: 20px; }
-  .modal-header { display: flex; align-items: center; gap: 8px; }
-  .modal-header h3 { font-size: 17px; font-weight: 700; flex: 1; }
-  .body { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .view { display: flex; flex-direction: column; gap: 14px; }
+  .body { display: flex; flex-direction: column; gap: 10px; }
   .center { display: flex; justify-content: center; padding: 40px; }
   .summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
   .chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; }
@@ -196,5 +194,5 @@
   .part small { color: var(--text2); font-size: 11px; }
   .preview { background: var(--surface2); border: 1px dashed var(--warn); border-radius: 8px; padding: 10px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
   .confirm { display: flex; gap: 8px; align-items: center; }
-  .modal-footer { display: flex; gap: 10px; justify-content: flex-end; }
+  .modal-footer { display: flex; gap: 10px; justify-content: flex-end; position: sticky; bottom: 0; padding: 12px 0; background: var(--bg); border-top: 1px solid var(--border-soft); }
 </style>

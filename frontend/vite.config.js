@@ -5,7 +5,7 @@ export default {
   server: {
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        target: process.env.API_TARGET || 'http://backend:8000',
         rewrite: path => path.replace(/^\/api/, '')
       }
     }
