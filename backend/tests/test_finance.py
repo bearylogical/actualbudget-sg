@@ -54,7 +54,7 @@ def test_ghostfolio_summary_and_auth(monkeypatch):
         assert req.headers["authorization"] == "Bearer jwt"
         if p == "/api/v1/account":
             return httpx.Response(200, json={"accounts": [{"name": "IBKR", "valueInBaseCurrency": 100.5}],
-                                             "totalValueInBaseCurrency": 100.5, "totalBalanceInBaseCurrency": 3})
+                                             "totalValueInBaseCurrency": 103.5, "totalBalanceInBaseCurrency": 3})
         if p == "/api/v2/portfolio/performance":
             return httpx.Response(200, json={"performance": {"netPerformancePercentageWithCurrencyEffect": 0.05}})
         if p == "/api/v1/portfolio/holdings":
@@ -112,6 +112,59 @@ def test_week_vs_usual():
     assert w["categories"][0] == {"category": "Uncategorised", "spent": 20000, "usual_week": 0}
     assert w["uncategorised"] == {"count": 1, "amount": 20000}
     assert w["largest"][0]["payee"] == "Shopee"
+
+
+def _gf_env(monkeypatch):
+    monkeypatch.setenv("GHOSTFOLIO_URL", "http://gf")
+    monkeypatch.setenv("GHOSTFOLIO_TOKEN", "tok")
+    ghostfolio._jwt.update(token=None, exp=0)
+
+
+def test_ghostfolio_summary_counts_securities_only(monkeypatch):
+    _gf_env(monkeypatch)
+
+    def handler(req):
+        p = req.url.path
+        if p == "/api/v1/auth/anonymous":
+            return httpx.Response(200, json={"authToken": "jwt"})
+        if p == "/api/v1/account":
+            return httpx.Response(200, json={"accounts": [
+                {"name": "IBKR", "valueInBaseCurrency": 1100, "balanceInBaseCurrency": 100},
+                {"name": "POSB", "valueInBaseCurrency": 50, "balanceInBaseCurrency": 50}],
+                "totalValueInBaseCurrency": 1150, "totalBalanceInBaseCurrency": 150})
+        if p == "/api/v1/portfolio/holdings":
+            return httpx.Response(200, json={"holdings": [
+                {"symbol": "VWRA.L", "valueInBaseCurrency": 1000, "assetSubClass": "ETF"},
+                {"symbol": "USD", "valueInBaseCurrency": 100, "assetSubClass": "CASH"}]})
+        return httpx.Response(200, json={})
+    s = ghostfolio.summary(httpx.MockTransport(handler))
+    assert s["value"] == 1000 and s["cash"] == 150
+    assert [h["symbol"] for h in s["holdings"]] == ["VWRA.L"]
+    assert s["accounts"] == [{"name": "IBKR", "value": 1000, "platform": None}]   # cash-only POSB dropped
+
+
+def test_ghostfolio_clear_cash(monkeypatch):
+    _gf_env(monkeypatch)
+    puts = []
+
+    def handler(req):
+        p = req.url.path
+        if p == "/api/v1/auth/anonymous":
+            return httpx.Response(200, json={"authToken": "jwt"})
+        if req.method == "PUT":
+            puts.append((p, __import__("json").loads(req.content)))
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"accounts": [
+            {"id": "ib", "name": "IBKR", "currency": "USD", "balance": 6463.28, "isExcluded": None, "platformId": None},
+            {"id": "posb", "name": "POSB", "currency": "SGD", "balance": 3010.69},
+            {"id": "z", "name": "Zero", "currency": "SGD", "balance": 0}]})
+    t = httpx.MockTransport(handler)
+    assert [a["id"] for a in ghostfolio.clear_cash(None, dry_run=True, transport=t)] == ["ib", "posb"] and not puts
+    assert [a["id"] for a in ghostfolio.clear_cash(["ib"], dry_run=False, transport=t)] == ["ib"]
+    path, body = puts[0]
+    assert path == "/api/v1/account/ib"
+    assert body == {"id": "ib", "name": "IBKR", "currency": "USD", "balance": 0, "comment": None,
+                    "isExcluded": False, "platformId": None}
 
 
 TXNS = [

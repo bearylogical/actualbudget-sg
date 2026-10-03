@@ -4,7 +4,7 @@ Three MCP servers, each doing one job:
 
 | Server | What Claude can do | Writes? |
 |---|---|---|
-| **budget-app** (`mcp/server.py`, this repo) | Money summary & guidance, review queue (list / scan / ask AI / decide), reconcile an account against a bank balance, IBKR → Ghostfolio preview & import, health | only through `review_decide` / `ibkr_to_ghostfolio_import` — call them after you've said yes |
+| **budget-app** (`mcp/server.py`, this repo) | Money summary & guidance, review queue (list / scan / ask AI / decide), reconcile an account against a bank balance, IBKR → Ghostfolio preview & import, health | only through `review_decide` / `ibkr_to_ghostfolio_import` / `ghostfolio_clear_cash` — call them after you've said yes |
 | **Actual** ([`actual-mcp`](https://github.com/s-stefanov/actual-mcp)) | Ad-hoc questions: spending by payee, trends, "what did I spend on Grab in August" | keep it **read-only** (no `--enable-write`) so every change goes through the review queue |
 | **Ghostfolio** ([`ghostfolio-mcp`](https://github.com/mhajder/ghostfolio-mcp)) | Holdings, performance, dividends | read what you need; imports go through budget-app so they're de-duplicated |
 
@@ -94,6 +94,9 @@ Because the budget-app runs on your network, the run must happen *on your Mac*:
 ## IBKR → Ghostfolio details
 
 * FX conversions are skipped; options/futures aren't supported by Ghostfolio.
+* Ghostfolio tracks stocks/ETFs only. Import links every activity to the IBKR account and then sets its cash
+  balance to 0 (cash is in Actual). `ghostfolio_clear_cash` (dry run unless `apply=true`) does the same for
+  other accounts; the Money summary counts Ghostfolio securities only.
 * Tickers are mapped from the listing exchange in your positions (`VWRA @LSEETF` → `VWRA.L`,
   `VWCE @IBIS2` → `VWCE.DE`, `ASML @AEB` → `ASML.AS`, US listings unchanged). Anything it
   can't map is listed under `unmapped`; add it to `/data/symbol_map.json` once.

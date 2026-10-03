@@ -9,7 +9,7 @@ Use when the user asks to update/sync IBKR into Ghostfolio, to check that Ghostf
 
 ## Requirements
 - Interactive Brokers connector (tools `get_account_trades`, `get_account_positions`).
-- budget-app MCP server (tools `ibkr_to_ghostfolio_preview`, `ibkr_to_ghostfolio_import`). If the tools aren't available, see **Troubleshooting** below; don't try to write to Ghostfolio another way.
+- budget-app MCP server (tools `ibkr_to_ghostfolio_preview`, `ibkr_to_ghostfolio_import`, `ghostfolio_clear_cash`). If the tools aren't available, see **Troubleshooting** below; don't try to write to Ghostfolio another way.
 
 ## Steps
 1. Read IBKR (read-only):
@@ -22,13 +22,18 @@ Use when the user asks to update/sync IBKR into Ghostfolio, to check that Ghostf
    - `unmapped` symbols: ask for the Yahoo ticker (e.g. `XYZ.DE`) and tell them it goes in `/data/symbol_map.json`
    - `ghostfolio_check` errors, if any
    - position differences after import, and `suggested_opening_lots` (older holdings at IBKR average cost)
+   - `account.cash_balance_to_clear`: the import sets the IBKR account's cash in Ghostfolio to 0
 4. Ask for explicit approval, separately for (a) the new activities and (b) the opening lots. Opening lots are a one-time setup; don't suggest them again once positions match.
-5. On approval, call `ibkr_to_ghostfolio_import` with the approved activities (JSON string) and the positions JSON. Report `imported` and any remaining `position_diff_after`, explaining each difference with its hint (older trades, transfer-in, corporate action, or a duplicate in Ghostfolio).
+5. On approval, call `ibkr_to_ghostfolio_import` with the approved activities (JSON string, unchanged from the preview) and the positions JSON. The server links every activity to the IBKR account, drops anything already in Ghostfolio, and zeroes the account's cash. Report `imported`, `already_imported`, `cash_cleared` and any remaining `position_diff_after`, explaining each difference with its hint (older trades, transfer-in, corporate action, or a duplicate in Ghostfolio).
+
+## Stocks only, no cash
+Ghostfolio tracks securities only; cash (bank and IBKR) lives in Actual, so cash in Ghostfolio would be counted twice in net worth. The import zeroes the IBKR account's balance; for other accounts (e.g. bank accounts created in Ghostfolio) call `ghostfolio_clear_cash` first without `apply` to list balances, then with `apply=true` after the user agrees. The Money summary counts Ghostfolio securities only, even if some cash remains.
 
 ## How "already imported" works
 - Activities synced from IBKR carry `ibkr:<trade id>` in the comment and are always recognised.
 - Activities the user typed into Ghostfolio by hand have no tag. They match on symbol + quantity + BUY/SELL **within ±1 day**, because Ghostfolio stores them at local (SGT) midnight, which is the previous day in UTC. If a hand-entered trade used a rounded quantity, it won't match. Point out any new activity that looks like a near-duplicate of one already in Ghostfolio before importing.
 - The account's cash balance in Ghostfolio (USD/EUR "holding") is ignored when comparing positions.
+- Hand-entered activities must sit in the IBKR account to be matched (the check runs per account).
 
 ## Troubleshooting
 Work down this list; stop at the first thing that's wrong.
@@ -42,7 +47,7 @@ Work down this list; stop at the first thing that's wrong.
 5. **Lots of "new" activities that are already in Ghostfolio**: check the dates and quantities of the Ghostfolio entries against IBKR (see "How already imported works"). Never import until that's explained.
 
 ## Rules
-- Never import without the user's yes. Never delete in Ghostfolio.
+- Never import or clear cash without the user's yes. Never delete in Ghostfolio.
 - Re-running is safe: activities carry `ibkr:<trade id>` and are skipped when already present.
 - Cash dividends aren't in the trade feed; mention that if the user asks about dividends. Dividend reinvestments (DRIP) come through as small BUYs.
 - This is record-keeping, not investment advice.
