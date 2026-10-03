@@ -10,3 +10,6 @@ watch/
 *.xls
 # secrets (LLM keys etc.)
 .env
+
+# data exports (contain the saved Actual password)
+*.tgz

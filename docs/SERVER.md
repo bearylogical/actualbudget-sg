@@ -34,6 +34,8 @@ GEMINI_API_KEY=…
 GHOSTFOLIO_URL=https://ghostfolio.local.bearylogical.net
 GHOSTFOLIO_TOKEN=…
 WATCH_DIR_HOST=/srv/budget-statements      # folder you drop statements into (SMB / Syncthing)
+BACKEND_PORT=127.0.0.1:8010                # only if 8000 is taken (Portainer uses it); nothing on the VM needs this port
+FRONTEND_PORT=3000                         # change if 3000 is taken
 
 # connector (step 4)
 MCP_PUBLIC_URL=https://budget-mcp.mangk.uk  # no trailing slash, no /mcp
@@ -65,7 +67,7 @@ scripts/move-data.sh import budget-app-data.tgz && rm budget-app-data.tgz
 ```sh
 docker compose up -d --build
 docker compose ps                           # all healthy
-curl -s http://127.0.0.1:8000/health | jq .status
+docker compose exec backend python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health').read()[:300])"
 ```
 
 Open the UI at `http://<vm>:3000`. Put it behind Traefik if you like (`budget-app.local.mangk.uk`).
