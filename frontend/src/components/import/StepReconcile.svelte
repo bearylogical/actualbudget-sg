@@ -13,6 +13,7 @@
   export let statement = null;
   export let transactions = [];
   export let aiAvailable = false;
+  export let uploadId = '';
 
   const API = '/api';
   const dispatch = createEventDispatcher();
@@ -30,7 +31,7 @@
   async function run(useLLM = false) {
     running = true; error = ''; usedAI = useLLM;
     try {
-      const body = { account_id: accountId, statement, transactions, use_llm: useLLM };
+      const body = { account_id: accountId, statement, transactions, use_llm: useLLM, uploadId };
       if (balance !== '' && balance != null) body.balance = isCard ? -Math.abs(Number(balance)) : Number(balance);
       res = await readJson(await fetch(`${API}/reconcile`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

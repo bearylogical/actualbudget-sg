@@ -16,6 +16,7 @@ from rules_audit import audit, to_markdown
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
 import connection
+import import_log
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -74,12 +75,15 @@ async def parse_statement(
     if not name.endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(400, f"Supported files: {', '.join(SUPPORTED_EXTENSIONS)}")
     content = await file.read()
+    upload_id = await run_in_threadpool(import_log.start, "ui", file.filename or "statement", content)
     try:
         transactions, bank, info = await run_in_threadpool(
             parse_statement_bytes, content, file.filename or ""
         )
     except Exception as e:
+        await run_in_threadpool(import_log.fail, upload_id, "parse", e)
         raise HTTPException(422, f"Could not parse statement: {e}")
+    await run_in_threadpool(import_log.set_statement, upload_id, info, len(transactions))
     ctx = await get_context()
     account = await recommend_account(info, transactions) if ctx else _no_recommendation(info)
     # an explicit choice wins; otherwise use a confident recommendation so account-scoped
@@ -96,6 +100,9 @@ async def parse_statement(
         "statement": info.to_dict(),
         "account": account,
         "actual_connected": ctx is not None,
+        "upload_id": upload_id,
+        # the exact same file (SHA-256) seen before — imported, undone or abandoned
+        "seen_before": import_log.seen_before(import_log.sha256(content), exclude=upload_id),
     }
 
 
@@ -389,7 +396,20 @@ async def actual_budget_month(month: str):
 
 @app.post("/actual/import")
 async def actual_import(body: dict):
-    return await _bridge("POST", "/import", body, timeout=60)
+    """Forward to the bridge. uploadId / accountName (from /parse) record the result in the history."""
+    upload_id = body.pop("uploadId", None)
+    account_name = body.pop("accountName", "")
+    dry = bool(body.get("dryRun"))
+    try:
+        data = await _bridge("POST", "/import", body, timeout=60)
+    except HTTPException as e:
+        if upload_id and not dry:
+            await run_in_threadpool(import_log.fail, upload_id, "import", e.detail)
+        raise
+    if upload_id and not dry:
+        await run_in_threadpool(import_log.record_result, upload_id, data, body.get("accountId", ""),
+                                account_name, "chosen in the web UI")
+    return data
 
 
 @app.post("/actual/undo-import")
@@ -399,7 +419,10 @@ async def actual_undo_import(body: dict):
     ids = [i for i in (body.get("ids") or []) if isinstance(i, str)]
     if not ids:
         raise HTTPException(400, "ids required")
-    return await _bridge("POST", "/txns/delete", {"ids": ids}, timeout=60)
+    data = await _bridge("POST", "/txns/delete", {"ids": ids}, timeout=60)
+    if body.get("uploadId"):
+        await run_in_threadpool(import_log.update, body["uploadId"], status="undone")
+    return data
 
 
 @app.post("/actual/reset")
@@ -536,9 +559,12 @@ async def review_scan(body: dict | None = None):
     end = body.get("end") or _date.today().isoformat()
     start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 90)))).isoformat()
     try:
-        return await run_in_threadpool(scan_and_queue, start, end, body.get("account_ids"))
+        res = await run_in_threadpool(scan_and_queue, start, end, body.get("account_ids"))
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
+    if body.get("uploadId"):
+        await run_in_threadpool(import_log.add_review_ids, body["uploadId"], [i["id"] for i in res["items"]])
+    return res
 
 
 @app.post("/review/{item_id}/decide")
@@ -723,10 +749,62 @@ async def reconcile_account(body: dict):
         raise HTTPException(400, "account_id required")
     info = acct.StatementInfo.from_dict(body.get("statement"))
     try:
-        return await run_in_threadpool(run_reconcile, body["account_id"], info, body.get("transactions") or [],
-                                       body.get("balance"), body.get("as_of"), body.get("use_llm", True))
+        res = await run_in_threadpool(run_reconcile, body["account_id"], info, body.get("transactions") or [],
+                                      body.get("balance"), body.get("as_of"), body.get("use_llm", True))
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
+    if body.get("uploadId"):
+        await run_in_threadpool(_log_reconcile, body["uploadId"], res)
+    return res
+
+
+def _log_reconcile(upload_id: str, res: dict):
+    import_log.update(upload_id, reconcile=import_log.reconcile_summary(res["report"], res.get("queued") or []))
+    import_log.add_review_ids(upload_id, [q["id"] for q in res.get("queued") or [] if q.get("id")])
+
+
+# ── Import history ───────────────────────────────────────────────────────────
+
+@app.get("/imports")
+async def imports_list(limit: int = 100, source: str = "", status: str = "", account_id: str = "",
+                       abandoned: bool = True):
+    """Every statement file uploaded in the UI or dropped in the watch folder, newest first."""
+    rows = await run_in_threadpool(import_log.listing, limit, source, status, account_id, abandoned)
+    return {"imports": rows, "summary": await run_in_threadpool(import_log.summary)}
+
+
+@app.get("/imports/{iid}")
+async def imports_get(iid: str):
+    r = await run_in_threadpool(import_log.get, iid)
+    if not r:
+        raise HTTPException(404, "No such import")
+    if r["review_ids"]:
+        statuses = await run_in_threadpool(review.statuses, r["review_ids"])
+        r["review"] = statuses
+    return r
+
+
+@app.get("/imports/{iid}/file")
+async def imports_file(iid: str):
+    from fastapi.responses import FileResponse
+    f = await run_in_threadpool(import_log.file_path, iid)
+    if not f:
+        raise HTTPException(404, "The original file isn't kept for this import")
+    return FileResponse(f[0], filename=f[1])
+
+
+@app.post("/imports/{iid}/undo")
+async def imports_undo(iid: str):
+    """Delete the rows this import added. Actual remembers deleted imported_ids per account,
+    so re-importing the same file into that account won't bring them back silently."""
+    r = await run_in_threadpool(import_log.get, iid)
+    if not r:
+        raise HTTPException(404, "No such import")
+    if r["status"] != "imported" or not r["added_ids"]:
+        raise HTTPException(409, "Only an import that added rows, and hasn't been undone, can be undone")
+    data = await _bridge("POST", "/txns/delete", {"ids": r["added_ids"]}, timeout=60)
+    await run_in_threadpool(import_log.update, iid, status="undone")
+    return {**data, "import": await run_in_threadpool(import_log.get, iid)}
 
 
 # ── Money dashboard (Actual + Ghostfolio) ────────────────────────────────────

@@ -45,6 +45,8 @@
   // ── Statement ─────────────────────────────────────────────────────────────────
   let transactions = [];
   let statementInfo = null;
+  let uploadId = "";        // import-history record for this file (from /parse)
+  let seenBefore = [];      // earlier imports of the exact same file
   let loading = false;
   let parseError = "";
   let catStats = null;
@@ -118,6 +120,8 @@
       transactions = data.transactions.map((t, i) => ({ ...t, id: i }));
       catStats = data.stats;
       statementInfo = data.statement || null;
+      uploadId = data.upload_id || "";
+      seenBefore = data.seen_before || [];
       accountId = "";
       accountRec = null;
       recAskedFor = null;
@@ -135,7 +139,7 @@
     importResult = null; rulesCreated = 0; scanNote = ""; undoneAccountId = "";
   }
   function startOver() {
-    transactions = []; statementInfo = null; accountId = ""; accountRec = null; catStats = null;
+    transactions = []; statementInfo = null; uploadId = ""; seenBefore = []; accountId = ""; accountRec = null; catStats = null;
     resetImport(); step = 1; reached = 1;
   }
 
@@ -233,7 +237,7 @@
       notes: (confirmed ? (t.notes || "").replace(/#llm/g, "").trim() : t.notes) || "",
       legacy_ids: [...(t.legacy_ids || []), legacyStmtId(t), await legacyHash(t)],
     })));
-    const payload = { accountId, dryRun, verified, transactions: rows };
+    const payload = { accountId, dryRun, verified, transactions: rows, uploadId, accountName };
     if (undoneAccountId && undoneAccountId === accountId) payload.reimportDeleted = true;
     return payload;
   }
@@ -260,7 +264,7 @@
     try {
       const res = await fetch(`${API}/review/scan`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ start: dates[0], end: dates[dates.length - 1] }),
+        body: JSON.stringify({ start: dates[0], end: dates[dates.length - 1], uploadId }),
       });
       const d = await res.json();
       if (res.ok) scanNote = d.queued || d.auto_applied
@@ -350,6 +354,7 @@
         Review{#if reviewPending}<span class="count">{reviewPending}</span>{/if}
       </button>
       <button class="tab" disabled={!actualBudgetLoaded} on:click={() => (showAudit = true)} title="Audit and sync your Actual rules">Rules</button>
+      <a class="tab" href="/history" title="Every statement uploaded here or dropped in the watch folder">History</a>
       <a class="tab" href="/money">Money</a>
     </nav>
     <div class="top-r">
@@ -411,6 +416,7 @@
             {parseError}
             {recLoading}
             locked={!!importResult}
+            {seenBefore}
             bind:blocked={stepOneBlocked}
             on:upload={(e) => uploadFile(e.detail)}
             on:pick={(e) => pickAccount(e.detail)}
@@ -443,6 +449,7 @@
             {includeCredits}
             credits={creditCount}
             {buildPayload}
+            {uploadId}
             {rulesCreated}
             {scanNote}
             bind:result={importResult}
@@ -459,6 +466,7 @@
             {accountName}
             statement={statementInfo}
             {transactions}
+            {uploadId}
             {aiAvailable}
             on:queued={refreshReviewCount}
             on:openReview={() => (showReview = true)}

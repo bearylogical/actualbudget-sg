@@ -215,6 +215,20 @@ POSB exports: 3 transfers linked, UOB One Account and POSB reconciled to the cen
 re-imports after linking add nothing, a deleted row / hand-typed duplicate / PDF-style
 re-import are each caught and fixed through the queue.
 
+## Import history
+
+**History** (top bar, `/history`) lists every statement file, whether it was uploaded in the
+web UI or dropped in the watch folder:
+
+* **What and where:** the file (name, size, SHA-256) and the statement as parsed (bank, account, last 4, period, closing balance). Also which Actual account it went into, and why (remembered, `ACCOUNT_ROUTES`, recommended, or chosen in the UI).
+* **The result:** imported, nothing new, failed (with the stage and error), undone, or uploaded but never imported. You also get the added / skipped / held counts, how rows were categorised, the reconciliation result and the Review items it raised.
+* **The original file:** a copy is kept in `DATA_DIR/statements/` so you can download exactly what was imported (`KEEP_STATEMENTS=false` turns that off). Uploading the exact same file again shows a notice with the earlier import.
+* **Undo:** removes the rows an import added, as on the import screen.
+
+API: `GET /imports`, `GET /imports/{id}`, `GET /imports/{id}/file`, `POST /imports/{id}/undo`.
+Stored in `DATA_DIR/imports.db` (shared by backend and scheduler). Imports from before
+this feature aren't listed.
+
 ## Health checks
 
 The dot in the top bar summarises all services — click it for details and **Test now** for the LLM.
