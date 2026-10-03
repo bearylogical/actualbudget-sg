@@ -209,7 +209,7 @@ def post_import_checks(info, transactions: list[dict], account_id: str, account_
         rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others)
         queued = []
         if rep["reconciled"]:
-            log.info(f"  Reconciled: Actual matches the bank balance")
+            log.info("  Reconciled: Actual matches the bank balance")
         else:
             llm = LLMCategorizer()
             use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true" and llm.enabled

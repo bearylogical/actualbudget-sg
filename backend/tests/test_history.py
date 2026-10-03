@@ -1,4 +1,3 @@
-from actual_rules import ActualContext
 from history import History
 from pipeline import enrich
 from tests.test_pipeline import CTX, FakeLLM, row

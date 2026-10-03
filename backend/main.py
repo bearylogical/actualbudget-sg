@@ -6,7 +6,7 @@ import pandas as pd
 import io
 import os
 import httpx
-from parsers import parse_bytes, parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
+from parsers import parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
 import accounts as acct
 from actual_rules import ActualContext
 from pipeline import enrich
