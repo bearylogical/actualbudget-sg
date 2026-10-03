@@ -914,3 +914,42 @@ async def finance_week(days: int = 7):
         raise HTTPException(502, str(e))
     names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
     return finance.week(rows, names, today, days)
+
+
+@app.get("/finance/transactions")
+async def finance_transactions(start: str = "", end: str = "", q: str = "", account: str = "",
+                               category: str = "", kind: str = "all", limit: int = 200):
+    """Historical Actual transactions, filtered, newest first (default: last 30 days, max 500 rows)."""
+    try:
+        end_d = _date.fromisoformat(end) if end else _date.today()
+        start_d = _date.fromisoformat(start) if start else end_d - _td(days=29)
+    except ValueError:
+        raise HTTPException(400, "start/end must be YYYY-MM-DD")
+    if start_d > end_d:
+        raise HTTPException(400, "start is after end")
+    if kind not in finance.TXN_KINDS:
+        raise HTTPException(400, f"kind must be one of {', '.join(finance.TXN_KINDS)}")
+    try:
+        rows, _ = await run_in_threadpool(bridge_client.txns, start_d.isoformat(), end_d.isoformat())
+        ctx = await run_in_threadpool(bridge_client.call, "GET", "/context")
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+    names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
+    r = finance.transactions(rows, names, q, account, category, kind, min(max(limit, 1), 500))
+    return {"from": start_d.isoformat(), "to": end_d.isoformat(), **r}
+
+
+@app.get("/finance/trends")
+async def finance_trends(months: int = 12):
+    """Monthly income / spending / categories and month-end balances for the last N months (max 24)."""
+    months = min(max(months, 1), 24)
+    today = _date.today()
+    start = _date(today.year, today.month, 1)
+    for _ in range(months - 1):
+        start = (start - _td(days=1)).replace(day=1)
+    try:
+        actual = await run_in_threadpool(bridge_client.call, "GET", f"/finance/summary?months={months}")
+        rows, _ = await run_in_threadpool(bridge_client.txns, start.isoformat(), today.isoformat())
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+    return finance.trends(actual, rows, _date.fromisoformat(actual.get("today") or today.isoformat()))
