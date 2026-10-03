@@ -935,6 +935,45 @@ async def ghostfolio_clear_cash(body: dict | None = None):
     return {"dry_run": body.get("dry_run", True) is not False, "accounts": changed}
 
 
+@app.get("/investments/ghostfolio/activities")
+async def ghostfolio_activities(account_id: str = "", symbol: str = ""):
+    """Activities in Ghostfolio (id, date, type, symbol, quantity, unitPrice, fee, comment), newest first."""
+    try:
+        rows = [ghostfolio.activity_view(o) for o in await run_in_threadpool(ghostfolio.orders, account_id or None)]
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    if symbol:
+        rows = [r for r in rows if symbol.upper() in str(r["symbol"] or "").upper()]
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return {"count": len(rows), "activities": rows}
+
+
+@app.post("/investments/ghostfolio/activities/{activity_id}/update")
+async def ghostfolio_update_activity(activity_id: str, body: dict):
+    """{changes: {fee?, quantity?, unitPrice?, date?, type?, currency?, comment?, accountId?}, dry_run?: true}"""
+    try:
+        return await run_in_threadpool(ghostfolio.update_activity, activity_id, body.get("changes") or {},
+                                       body.get("dry_run", True) is not False)
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+
+
+@app.post("/investments/ghostfolio/activities/{activity_id}/delete")
+async def ghostfolio_delete_activity(activity_id: str, body: dict | None = None):
+    """{dry_run?: true} — delete one activity (dry run by default)."""
+    try:
+        return await run_in_threadpool(ghostfolio.delete_activity, activity_id,
+                                       (body or {}).get("dry_run", True) is not False)
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+
+
 @app.get("/finance/week")
 async def finance_week(days: int = 7):
     """Last N days of spending vs your usual week (previous 4 weeks)."""

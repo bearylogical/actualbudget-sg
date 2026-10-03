@@ -164,7 +164,7 @@ def test_ghostfolio_clear_cash(monkeypatch):
     path, body = puts[0]
     assert path == "/api/v1/account/ib"
     assert body == {"id": "ib", "name": "IBKR", "currency": "USD", "balance": 0, "comment": None,
-                    "isExcluded": False, "platformId": None}
+                    "platformId": None}   # no isExcluded: newer Ghostfolio rejects it
 
 
 TXNS = [
@@ -205,3 +205,56 @@ def test_trends_months_and_month_end_balances():
     assert jul["balance_end"]["off_budget"] == 5_000_000                  # dividend dated 31 Jul is inside July
     assert r["months"][-1]["balance_end"]["total"] == 2_000_000 - 150_000 + 5_000_000
     assert not r["months"][-1]["partial"]
+
+
+def _activity_handler(calls, legacy=False):
+    act = {"id": "a1", "date": "2026-03-22T16:00:00.000Z", "type": "BUY", "quantity": 9.1261, "unitPrice": 164.36,
+           "fee": 0, "currency": "USD", "comment": None, "accountId": "ib", "tags": [{"id": "t1"}],
+           "SymbolProfile": {"symbol": "VWRA.L", "dataSource": "YAHOO", "currency": "USD"}}
+
+    def handler(req):
+        p = req.url.path
+        if p == "/api/v1/auth/anonymous":
+            return httpx.Response(200, json={"authToken": "jwt"})
+        if req.method == "GET" and p == "/api/v1/activities":
+            return httpx.Response(200, json={"activities": [act]})
+        if legacy and p.startswith("/api/v1/activities/"):
+            return httpx.Response(404)
+        if req.method in ("PUT", "DELETE"):
+            calls.append((req.method, p, __import__("json").loads(req.content) if req.content else None))
+            return httpx.Response(200, json={**act, **(calls[-1][2] or {})} if req.method == "PUT" else {})
+        return httpx.Response(404)
+    return handler
+
+
+def test_ghostfolio_update_activity(monkeypatch):
+    _gf_env(monkeypatch)
+    for legacy in (False, True):
+        calls = []
+        t = httpx.MockTransport(_activity_handler(calls, legacy))
+        dry = ghostfolio.update_activity("a1", {"fee": 1.70}, dry_run=True, transport=t)
+        assert dry["before"]["fee"] == 0 and dry["after"]["fee"] == 1.70 and not calls
+        ghostfolio.update_activity("a1", {"fee": 1.70}, dry_run=False, transport=t)
+        method, path, body = calls[0]
+        assert method == "PUT" and path == ("/api/v1/order/a1" if legacy else "/api/v1/activities/a1")
+        assert body["fee"] == 1.70 and body["symbol"] == "VWRA.L" and body["dataSource"] == "YAHOO"
+        assert body["date"] == "2026-03-22T16:00:00.000Z" and body["tags"] == ["t1"] and body["accountId"] == "ib"
+
+
+def test_ghostfolio_update_activity_rejects_symbol(monkeypatch):
+    _gf_env(monkeypatch)
+    import pytest
+    with pytest.raises(ghostfolio.GhostfolioError):
+        ghostfolio.update_activity("a1", {"symbol": "X"}, transport=httpx.MockTransport(_activity_handler([])))
+
+
+def test_ghostfolio_delete_activity(monkeypatch):
+    _gf_env(monkeypatch)
+    calls = []
+    t = httpx.MockTransport(_activity_handler(calls))
+    assert ghostfolio.delete_activity("a1", dry_run=True, transport=t)["deleted"]["symbol"] == "VWRA.L" and not calls
+    ghostfolio.delete_activity("a1", dry_run=False, transport=t)
+    assert calls == [("DELETE", "/api/v1/activities/a1", None)]
+    import pytest
+    with pytest.raises(ghostfolio.GhostfolioError):
+        ghostfolio.delete_activity("nope", transport=t)

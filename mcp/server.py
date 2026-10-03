@@ -280,6 +280,33 @@ def ghostfolio_clear_cash(apply: bool = False, account_ids: str = "") -> dict:
 
 
 @read_tool()
+def ghostfolio_list_activities(account_id: str = "", symbol: str = "") -> dict:
+    """List Ghostfolio activities (id, date, type, symbol, quantity, unitPrice, fee, currency, comment,
+    accountId), newest first. Filter by account_id and/or symbol (substring, e.g. "VWRA").
+    Use it to find the id for ghostfolio_update_activity / ghostfolio_delete_activity."""
+    q = urlencode({k: v for k, v in {"account_id": account_id, "symbol": symbol}.items() if v})
+    return _req("GET", f"/investments/ghostfolio/activities{'?' + q if q else ''}")
+
+
+@write_tool()
+def ghostfolio_update_activity(activity_id: str, changes_json: str, apply: bool = False) -> dict:
+    """Edit one Ghostfolio activity. changes_json: JSON object with any of fee, quantity, unitPrice,
+    date (YYYY-MM-DD or ISO), type (BUY/SELL/...), currency, comment, accountId — e.g. {"fee": 1.70}.
+    apply=false (default) returns {before, after} without writing; call with apply=true only after
+    the user approved that exact change. To change the symbol, delete and re-import instead."""
+    return _req("POST", f"/investments/ghostfolio/activities/{activity_id}/update",
+                {"changes": json.loads(changes_json), "dry_run": not apply})
+
+
+@write_tool()
+def ghostfolio_delete_activity(activity_id: str, apply: bool = False) -> dict:
+    """Delete one Ghostfolio activity. apply=false (default) shows the activity that would be deleted;
+    call with apply=true only after the user explicitly approved deleting it. Not reversible —
+    an IBKR-synced trade can be brought back by re-running the IBKR import."""
+    return _req("POST", f"/investments/ghostfolio/activities/{activity_id}/delete", {"dry_run": not apply})
+
+
+@read_tool()
 def weekly_snapshot() -> dict:
     """Everything a weekly money report needs in one call: last 7 days of spending vs your usual
     week (by category, top payees, largest items), month-to-date pace and guidance, net worth /

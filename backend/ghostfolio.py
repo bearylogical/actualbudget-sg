@@ -179,9 +179,11 @@ def import_activities(activities: list[dict], dry_run: bool = True, transport=No
 
 
 def set_cash_balance(account: dict, balance: float = 0, transport=None) -> None:
-    """PUT the account back unchanged except for its cash balance (Ghostfolio needs the full account)."""
+    """PUT the account back unchanged except for its cash balance (Ghostfolio needs the full account).
+    isExcluded is left out: newer Ghostfolio rejects it ("property isExcluded should not exist") and
+    leaves fields that aren't sent unchanged."""
     body = {"id": account["id"], "name": account.get("name"), "currency": account.get("currency"),
-            "balance": balance, "comment": account.get("comment"), "isExcluded": bool(account.get("isExcluded")),
+            "balance": balance, "comment": account.get("comment"),
             "platformId": account.get("platformId") or (account.get("platform") or {}).get("id")}
     with _client(transport) as c:
         token = _auth(c)
@@ -204,3 +206,88 @@ def clear_cash(account_ids: list[str] | None = None, dry_run: bool = True, trans
         changed.append({"id": a["id"], "name": a.get("name"), "currency": a.get("currency"),
                         "balance": float(a.get("balance") or 0)})
     return changed
+
+
+# ── edit / delete single activities ───────────────────────────────────────────
+
+def _send(client: httpx.Client, method: str, paths: list[str], body: dict | None = None) -> httpx.Response:
+    """Authenticated write; tries each path in turn on 404 (Ghostfolio renamed /order → /activities)."""
+    r = None
+    for path in paths:
+        def go():
+            return client.request(method, f"{_base()}/api/{path}", json=body,
+                                  headers={"Authorization": f"Bearer {_auth(client)}"})
+        r = go()
+        if r.status_code == 401:
+            _jwt["token"] = None
+            r = go()
+        if r.status_code != 404:
+            return r
+    return r
+
+
+def activity_view(o: dict) -> dict:
+    """Flat, readable view of a Ghostfolio activity."""
+    prof = o.get("SymbolProfile") or o.get("assetProfile") or {}
+    return {"id": o.get("id"), "date": str(o.get("date", ""))[:10], "type": o.get("type"),
+            "symbol": prof.get("symbol") or o.get("symbol"), "dataSource": prof.get("dataSource") or o.get("dataSource"),
+            "quantity": o.get("quantity"), "unitPrice": o.get("unitPrice"), "fee": o.get("fee"),
+            "currency": o.get("currency") or prof.get("currency"), "comment": o.get("comment"),
+            "accountId": o.get("accountId") or (o.get("account") or o.get("Account") or {}).get("id")}
+
+
+def find_activity(activity_id: str, transport=None) -> dict:
+    o = next((x for x in orders(None, transport) if x.get("id") == activity_id), None)
+    if not o:
+        raise GhostfolioError(f"Ghostfolio has no activity {activity_id}")
+    return o
+
+
+EDITABLE = {"date", "type", "quantity", "unitPrice", "fee", "currency", "comment", "accountId"}
+
+
+def update_activity(activity_id: str, changes: dict, dry_run: bool = True, transport=None) -> dict:
+    """Change fields of one activity (EDITABLE only). Ghostfolio's PUT needs the full activity, so the
+    current one is read first and the changes are merged in. Returns {before, after}."""
+    bad = set(changes) - EDITABLE
+    if bad:
+        raise GhostfolioError(f"can't edit {sorted(bad)} — editable fields: {sorted(EDITABLE)} "
+                              "(to change the symbol, delete the activity and import it again)")
+    if not changes:
+        raise GhostfolioError("no changes given")
+    o = find_activity(activity_id, transport)
+    before = activity_view(o)
+    after = {**before, **changes}
+    if "date" in changes:
+        d = str(changes["date"])
+        iso = d if "T" in d else f"{d}T00:00:00.000Z"
+        after["date"] = d[:10]
+    else:
+        iso = str(o.get("date"))   # keep the stored timestamp exactly
+    if dry_run:
+        return {"dry_run": True, "before": before, "after": after}
+    body = {"id": activity_id, "accountId": after["accountId"], "comment": after["comment"],
+            "currency": after["currency"], "dataSource": after["dataSource"],
+            "date": iso,
+            "fee": float(after["fee"] or 0), "quantity": float(after["quantity"]), "symbol": after["symbol"],
+            "type": after["type"], "unitPrice": float(after["unitPrice"])}
+    tags = [t["id"] for t in (o.get("tags") or []) if isinstance(t, dict) and t.get("id")]
+    if tags:
+        body["tags"] = tags
+    with _client(transport) as c:
+        r = _send(c, "PUT", [f"v1/activities/{activity_id}", f"v1/order/{activity_id}"], body)
+    if r.status_code >= 400:
+        raise GhostfolioError(f"Ghostfolio activity update failed ({r.status_code}): {r.text[:300]}")
+    return {"dry_run": False, "before": before, "after": activity_view(r.json()) if r.content else after}
+
+
+def delete_activity(activity_id: str, dry_run: bool = True, transport=None) -> dict:
+    """Delete one activity. Returns the activity that was (or, on a dry run, would be) deleted."""
+    before = activity_view(find_activity(activity_id, transport))
+    if dry_run:
+        return {"dry_run": True, "deleted": before}
+    with _client(transport) as c:
+        r = _send(c, "DELETE", [f"v1/activities/{activity_id}", f"v1/order/{activity_id}"])
+    if r.status_code >= 400:
+        raise GhostfolioError(f"Ghostfolio activity delete failed ({r.status_code}): {r.text[:300]}")
+    return {"dry_run": False, "deleted": before}
