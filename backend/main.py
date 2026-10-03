@@ -841,12 +841,17 @@ async def finance_brief():
 
 
 # ── Investments: IBKR → Ghostfolio (on demand, data read by Claude's IBKR connector) ──
+import re
+
 import ibkr_ghostfolio as ibgf
 
 
 def _ibkr_account(account_id: str | None) -> dict:
     if account_id:
-        return {"id": account_id}
+        a = next((x for x in ghostfolio.accounts() if x["id"] == account_id), None)
+        if not a:
+            raise HTTPException(400, f"Ghostfolio has no account {account_id}")
+        return a
     a = ghostfolio.find_broker_account()
     if not a:
         raise HTTPException(400, "No IBKR account found in Ghostfolio — create one (platform: Interactive Brokers) "
@@ -871,7 +876,8 @@ async def ibkr_preview(body: dict):
                                                   for x in new])
         first = min((x["date"][:10] for x in mapped["activities"]), default=_date.today().isoformat())
         opening_date = (_date.fromisoformat(first) - _td(days=1)).isoformat()
-        return {"account": {"id": a["id"], "name": a.get("name")}, "new": new, "already_imported": len(dup),
+        return {"account": {"id": a["id"], "name": a.get("name"), "currency": a.get("currency"),
+                            "cash_balance_to_clear": float(a.get("balance") or 0)}, "new": new, "already_imported": len(dup),
                 "skipped": mapped["skipped"], "unmapped": mapped["unmapped"], "ghostfolio_check": problems,
                 "position_diff_before": before, "position_diff_after_import": after,
                 "suggested_opening_lots": ibgf.opening_lots(body.get("positions") or [], after, a["id"], opening_date)}
@@ -885,21 +891,48 @@ async def ibkr_preview(body: dict):
 
 @app.post("/investments/ibkr/import")
 async def ibkr_import(body: dict):
-    """{activities: [...from preview.new], positions?: [...]} — imports into Ghostfolio."""
+    """{activities: [...from preview.new], positions?: [...], account_id?, keep_cash?} — imports into Ghostfolio.
+
+    Every activity is linked to the IBKR account (activities without accountId would land in no account),
+    anything already in Ghostfolio is dropped again (safe to re-run), and afterwards the account's cash
+    balance is set to 0 so Ghostfolio tracks the stocks/ETFs only — the cash is tracked in Actual."""
     acts = body.get("activities") or []
     if not acts:
         raise HTTPException(400, "nothing to import")
+    bad = [a for a in acts if not re.search(r"ibkr:\S+", str(a.get("comment") or ""))]
+    if bad:
+        raise HTTPException(400, f"{len(bad)} activities lack the ibkr:<trade id> comment — pass the preview's "
+                                 "`new` / `suggested_opening_lots` unchanged")
     def run():
-        res = ghostfolio.import_activities(acts, dry_run=False)
-        acct_id = acts[0].get("accountId")
-        diff = ibgf.compare_positions(body.get("positions") or [], ghostfolio.holdings(acct_id)) if body.get("positions") else None
-        return {"imported": len(res.get("activities", acts)), "position_diff_after": diff}
+        a = _ibkr_account(body.get("account_id") or next((x["accountId"] for x in acts if x.get("accountId")), None))
+        linked = [{**x, "accountId": a["id"]} for x in acts]
+        new, dup = ibgf.already_imported(linked, ghostfolio.orders(a["id"]))
+        res = ghostfolio.import_activities(new, dry_run=False) if new else {"activities": []}
+        cleared = [] if body.get("keep_cash") else ghostfolio.clear_cash([a["id"]], dry_run=False)
+        diff = ibgf.compare_positions(body.get("positions") or [], ghostfolio.holdings(a["id"])) if body.get("positions") else None
+        return {"account": {"id": a["id"], "name": a.get("name")}, "imported": len(res.get("activities", new)),
+                "already_imported": len(dup), "cash_cleared": cleared, "position_diff_after": diff}
     try:
         return await run_in_threadpool(run)
     except ghostfolio.GhostfolioError as e:
         raise HTTPException(400, str(e))
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+
+
+@app.post("/investments/ghostfolio/clear-cash")
+async def ghostfolio_clear_cash(body: dict | None = None):
+    """{account_ids?: [...], dry_run?: true} — zero cash balances so Ghostfolio tracks securities only.
+    Default is a dry run over all accounts; activities and holdings are never touched."""
+    body = body or {}
+    try:
+        changed = await run_in_threadpool(ghostfolio.clear_cash, body.get("account_ids") or None,
+                                          body.get("dry_run", True) is not False)
+    except ghostfolio.GhostfolioError as e:
+        raise HTTPException(400, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    return {"dry_run": body.get("dry_run", True) is not False, "accounts": changed}
 
 
 @app.get("/finance/week")
@@ -914,3 +947,48 @@ async def finance_week(days: int = 7):
         raise HTTPException(502, str(e))
     names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
     return finance.week(rows, names, today, days)
+
+
+# ── MCP audit trail (events from mcp / mcp-public) + Telegram digest ─────────
+# Not reachable through the UI: nginx refuses /api/audit/ (see frontend/nginx.conf).
+import asyncio
+import logging
+
+import audit
+
+
+@app.post("/audit/mcp")
+async def audit_ingest(body: dict):
+    await run_in_threadpool(audit.record, body)
+    return {"ok": True}
+
+
+@app.get("/audit/mcp")
+async def audit_summary(hours: float = 24):
+    import time as _time
+    return await run_in_threadpool(audit.summarize, _time.time() - hours * 3600)
+
+
+@app.post("/audit/mcp/digest")
+async def audit_digest(force: bool = True, send: bool = True):
+    """Send the Telegram digest now (force) — or send=false to preview the text."""
+    try:
+        r = await run_in_threadpool(audit.digest, force, send)
+    except (httpx.HTTPError, RuntimeError) as e:
+        raise HTTPException(502, str(e))
+    return {k: v for k, v in r.items() if k != "summary"}
+
+
+async def _audit_digest_loop():
+    while True:
+        try:
+            await run_in_threadpool(audit.digest)
+        except Exception as e:                      # keep going; the next tick retries
+            logging.getLogger("audit").warning("audit digest failed: %s", e)
+        await asyncio.sleep(300)
+
+
+@app.on_event("startup")
+async def _start_audit_digest():
+    if audit.telegram_configured():
+        asyncio.create_task(_audit_digest_loop())

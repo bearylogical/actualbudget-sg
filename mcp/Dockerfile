@@ -2,7 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py oauth.py ./
+COPY server.py oauth.py mcp_audit.py ./
 RUN useradd -r -u 10001 mcp && mkdir -p /data && chown mcp /data
 USER mcp
 EXPOSE 8765

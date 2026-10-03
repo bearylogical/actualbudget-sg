@@ -56,6 +56,10 @@ services:
       # Investments for the Money dashboard (Ghostfolio → Settings → Security token)
       GHOSTFOLIO_URL: "${GHOSTFOLIO_URL:-}"
       GHOSTFOLIO_TOKEN: "${GHOSTFOLIO_TOKEN:-}"
+      # MCP audit trail → Telegram digest (backend/audit.py). No digest without both.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      TELEGRAM_DIGEST_HOURS: "${TELEGRAM_DIGEST_HOURS:-24}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status == 200 else 1)"]
       interval: 30s
@@ -156,6 +160,8 @@ services:
       # Only Anthropic (claude.ai) may reach /mcp, /token, /register…; your browser still gets
       # /authorize + /login. The in-app version of the WAF rule. Set it empty for Tailscale Funnel.
       MCP_ALLOWED_CIDRS: "${MCP_ALLOWED_CIDRS-160.79.104.0/21}"
+      # Once Claude is connected, refuse every other client (run `oauth.py revoke-all` to reconnect).
+      MCP_SINGLE_GRANT: "${MCP_SINGLE_GRANT:-true}"
       DATA_DIR: "/data"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=4).status == 200 else 1)"]

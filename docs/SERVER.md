@@ -18,8 +18,11 @@ Here is what reaches the internet:
 * **Callbacks:** only Claude's callback (`https://claude.ai/api/mcp/auth_callback`) can register as a client.
 * **Tokens:** access tokens last 1 hour. Refresh tokens last 30 days and rotate on every use. A replayed refresh token revokes the whole grant.
 * **Brute force:** sign-in locks for 15 minutes after 5 wrong passwords.
+* **One connection:** once Claude is connected, no other client can register or sign in, even with the right password. Someone who adds your URL as a connector in *their* claude.ai account and sends you the sign-in link gets refused. To reconnect, run `oauth.py revoke-all` first. Turn it off with `MCP_SINGLE_GRANT=false`.
+* **Audit trail:** every tool call (both MCP servers) and every sign-in, wrong password, lockout, token replay and blocked IP is recorded, and summarised to Telegram (see [Audit trail](#audit-trail)).
 * **Source IP:** only Anthropic's range (`160.79.104.0/21`) can reach the MCP and token endpoints. Your browser only gets `/authorize` and `/login`. `mcp-public` checks this itself (`MCP_ALLOWED_CIDRS`), and a Cloudflare WAF rule can add a second check at the edge.
 * **Not exposed:** the backend, bridge, UI and the write-enabled `mcp` stay off the internet.
+  The UI has no login of its own, and anyone who can reach port 3000 can read and change everything through `/api`. Traefik's authentication only covers requests that go through Traefik. If Traefik runs in Docker on the same VM, put it on the compose network and set `FRONTEND_PORT=127.0.0.1:3000`. Otherwise, firewall port 3000 to Traefik's address.
 
 ## 1. On the VM
 
@@ -145,12 +148,36 @@ curl -si -X POST https://budget-mcp.mangk.uk/mcp | head -1                      
 Then open the **Weekly Money & Portfolio Report** scheduled task, attach the connector and turn
 off **Require this computer**.
 
+## Audit trail
+
+Both MCP servers send every tool call (tool name, summarised arguments, the Claude client, result, duration) and every security event to the backend (`/audit/mcp`, stored in `audit.db` in the `scheduler-data` volume, kept 180 days). Each event is also printed to the container log as an `AUDIT {...}` line. The UI can't reach these endpoints, because nginx refuses `/api/audit/`.
+
+Every `TELEGRAM_DIGEST_HOURS` (default 24) the backend sends one message with:
+* calls per tool and per client, and errors;
+* every write call (tool, time, arguments, success);
+* sign-ins, registrations and revocations. Security events are flagged ⚠️: wrong passwords, lockouts, refused registrations or sign-ins, refresh-token replays and blocked IPs.
+
+Nothing is sent for a quiet period.
+
+Setup:
+1. In Telegram, ask @BotFather for `/newbot` and copy the token.
+2. Send your bot any message, then open `https://api.telegram.org/bot<token>/getUpdates` and copy `chat.id`.
+3. Add `TELEGRAM_BOT_TOKEN=…` and `TELEGRAM_CHAT_ID=…` to `.env`, then run `docker compose up -d backend`.
+4. Test: `docker compose exec backend python -c "import audit; print(audit.digest(force=True))"`.
+
+| Task | Command |
+|---|---|
+| Last 24 h, as JSON | `docker compose exec backend python -c "import audit,time,json; print(json.dumps(audit.summarize(time.time()-86400), indent=1))"` |
+| Preview the digest text | `docker compose exec backend python -c "import audit; print(audit.digest(force=True, send=False)['text'])"` |
+| Raw events | `docker compose logs mcp-public mcp \| grep AUDIT` |
+
 ## Operating it
 
 | Task | Command |
 |---|---|
 | Who's connected | `docker compose exec mcp-public python oauth.py list` |
 | Sign Claude out everywhere | `docker compose exec mcp-public python oauth.py revoke-all` (Claude asks you to sign in again) |
+| Reconnect Claude (e.g. "already connected" on Connect) | `revoke-all` as above, then Connect in claude.ai |
 | Change the password | new hash → `.env` → `docker compose --profile connector up -d mcp-public`. Existing tokens stay valid until revoked, so revoke too |
 | Kill switch | `docker compose stop cloudflared` (or delete the tunnel) |
 | Locked out after wrong passwords | wait 15 minutes, or `docker compose exec mcp-public python oauth.py unlock` |

@@ -53,3 +53,38 @@ def test_dedup_matches_hand_entered_local_midnight():
                  "quantity": vwra["quantity"], "assetProfile": {"symbol": "VWRA.L"}}]
     new, dup = m.already_imported(acts, existing)
     assert [a["symbol"] for a in dup] == ["VWRA.L"] and [a["symbol"] for a in new] == ["XYZ.DE"]
+
+
+def test_cash_holding_ignored_in_position_check():
+    h = [{"symbol": "GOOGL", "quantity": 3}, {"symbol": "USD", "quantity": 6463.28, "assetProfile": {"assetSubClass": "CASH"}}]
+    assert [d["symbol"] for d in m.compare_positions(POS, h, {})] == ["VWRA.L", "VWCE.DE"]
+
+
+def test_import_links_account_skips_duplicates_and_clears_cash(monkeypatch):
+    from fastapi.testclient import TestClient
+    import ghostfolio
+    import main
+
+    acct = {"id": "ib", "name": "IBKR", "currency": "USD", "balance": 6463.28}
+    sent, cleared = {}, []
+    monkeypatch.setattr(ghostfolio, "accounts", lambda: [acct])
+    monkeypatch.setattr(ghostfolio, "orders", lambda account_id=None: [
+        {"comment": "ibkr:t1", "date": "2026-09-01T10:00:00.000Z", "type": "BUY", "quantity": 5,
+         "SymbolProfile": {"symbol": "VWRA.L"}}])
+    monkeypatch.setattr(ghostfolio, "import_activities",
+                        lambda acts, dry_run=True: sent.update(acts=acts, dry=dry_run) or {"activities": acts})
+    monkeypatch.setattr(ghostfolio, "clear_cash",
+                        lambda ids, dry_run=True: cleared.append((ids, dry_run)) or [{**acct}])
+    monkeypatch.setattr(ghostfolio, "holdings", lambda account_id=None: [])
+
+    acts = m.map_trades(TRADES, POS, None, {"XYZ": "XYZ.DE"})["activities"]   # no accountId on purpose
+    r = TestClient(main.app).post("/investments/ibkr/import", json={"activities": acts, "account_id": "ib"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["imported"], body["already_imported"]) == (1, 1)
+    assert [a["symbol"] for a in sent["acts"]] == ["XYZ.DE"] and sent["dry"] is False
+    assert all(a["accountId"] == "ib" for a in sent["acts"])
+    assert cleared == [(["ib"], False)] and body["cash_cleared"][0]["balance"] == 6463.28
+
+    r = TestClient(main.app).post("/investments/ibkr/import", json={"activities": [{**acts[0], "comment": "hand"}]})
+    assert r.status_code == 400 and "ibkr:" in r.json()["detail"]

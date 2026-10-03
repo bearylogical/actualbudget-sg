@@ -14,6 +14,12 @@ person:
   refresh 30 days and rotated on every use. A reused (stolen) refresh token revokes the
   whole grant.
 * Wrong passwords lock sign-in for 15 minutes after 5 tries.
+* Single grant (MCP_SINGLE_GRANT, default on): while Claude holds a live grant, no other
+  client can register or sign in, so a sign-in link someone else generated (e.g. by adding
+  your URL as a connector in their own claude.ai account) is refused even with the right
+  password. To reconnect, run `python oauth.py revoke-all` first.
+* Every registration, sign-in, wrong password, lockout, token replay and blocked IP is
+  sent to the audit trail (mcp_audit.py → backend → Telegram digest).
 * Optional source-IP gate (MCP_ALLOWED_CIDRS, e.g. Anthropic's 160.79.104.0/21): everything
   except the browser pages (/authorize, /login) and /healthz is refused from other addresses.
   It's the WAF rule from docs/SERVER.md, done in-app for plans/tunnels without one.
@@ -52,6 +58,8 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+import mcp_audit
 
 SCOPE = "budget:read"
 ACCESS_TTL = int(os.getenv("MCP_ACCESS_TTL", "3600"))
@@ -131,8 +139,10 @@ class Store:
 class OwnerOAuthProvider:
     """OAuthAuthorizationServerProvider for one owner, persisted in SQLite."""
 
-    def __init__(self, public_url: str, password_hash: str, data_dir: Path, allow_loopback: bool = False):
+    def __init__(self, public_url: str, password_hash: str, data_dir: Path, allow_loopback: bool = False,
+                 single_grant: bool = True):
         self.public_url = public_url.rstrip("/")
+        self.single_grant = single_grant
         self.resource = self.public_url + "/mcp"
         self.password_hash = password_hash
         self.allow_loopback = allow_loopback
@@ -143,22 +153,44 @@ class OwnerOAuthProvider:
         r = self.store.q("SELECT info FROM clients WHERE client_id=?", (client_id,))
         return OAuthClientInformationFull.model_validate_json(r[0]["info"]) if r else None
 
+    def connected_clients(self) -> set[str]:
+        """Clients holding a live grant (an unused, unexpired refresh token)."""
+        return {r["client_id"] for r in self.store.q(
+            "SELECT DISTINCT client_id FROM tokens WHERE kind='refresh' AND used=0 AND expires>?", (time.time(),))}
+
+    def _pinned_out(self, client_id: str | None) -> bool:
+        live = self.connected_clients()
+        return self.single_grant and bool(live) and client_id not in live
+
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         uris = [str(u) for u in (client_info.redirect_uris or [])]
         if not uris or not all(redirect_allowed(u, self.allow_loopback) for u in uris):
+            mcp_audit.auth("registration_refused", ok=False, reason="redirect_uri", redirect_uris=uris[:3])
             raise RegistrationError("invalid_redirect_uri",
                                     "this server only accepts Claude's OAuth callback")
+        if self._pinned_out(client_info.client_id):
+            mcp_audit.auth("registration_refused", ok=False, reason="already connected",
+                           client_name=client_info.client_name)
+            raise RegistrationError("invalid_client_metadata",
+                                    "Claude is already connected to this server. To connect again, run "
+                                    "`python oauth.py revoke-all` on the server first.")
         # keep the table small: DCR registers a new client on every fresh connection
         self.store.q("DELETE FROM clients WHERE client_id IN (SELECT client_id FROM clients ORDER BY created DESC "
                      "LIMIT -1 OFFSET ?) AND client_id NOT IN (SELECT DISTINCT client_id FROM tokens)",
                      (MAX_CLIENTS - 1,))
         self.store.q("INSERT OR REPLACE INTO clients VALUES (?,?,?)",
                      (client_info.client_id, client_info.model_dump_json(), time.time()))
+        mcp_audit.auth("registered", client=(client_info.client_id or "")[:12], client_name=client_info.client_name)
 
     # authorize → our sign-in page --------------------------------------------
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         if not redirect_allowed(str(params.redirect_uri), self.allow_loopback):
+            mcp_audit.auth("authorize_refused", ok=False, client=client.client_id[:12], reason="redirect_uri")
             raise AuthorizeError("unauthorized_client", "redirect URI not allowed")
+        if self._pinned_out(client.client_id):
+            mcp_audit.auth("authorize_refused", ok=False, client=client.client_id[:12], reason="already connected")
+            raise AuthorizeError("access_denied", "Claude is already connected to this server. To connect "
+                                                  "again, run `python oauth.py revoke-all` on the server first.")
         self.store.gc()
         rid = secrets.token_urlsafe(24)
         self.store.q("INSERT INTO pending VALUES (?,?,?,?)",
@@ -173,19 +205,26 @@ class OwnerOAuthProvider:
         r = self.store.q("SELECT until FROM lockout WHERE k='owner'")
         return max(0, int(r[0]["until"] - time.time())) if r else 0
 
-    def complete_login(self, rid: str, password: str) -> tuple[str | None, str | None]:
+    def complete_login(self, rid: str, password: str, ip: str | None = None) -> tuple[str | None, str | None]:
         """→ (redirect_url, error). Single-use: the pending request is consumed on success."""
         if (wait := self.locked_for()):
+            mcp_audit.auth("login_failed", ok=False, reason="locked", ip=ip)
             return None, f"Too many wrong passwords. Try again in {wait // 60 + 1} min."
         p = self.pending(rid)
         if not p:
             return None, "This sign-in link expired. Start again from Claude."
         client_id, params = p
+        if self._pinned_out(client_id):
+            mcp_audit.auth("authorize_refused", ok=False, client=client_id[:12], reason="already connected", ip=ip)
+            return None, "Claude is already connected. To connect again, run `python oauth.py revoke-all` on the server."
         if not check_password(password, self.password_hash):
             r = self.store.q("SELECT fails FROM lockout WHERE k='owner'")
             fails = (r[0]["fails"] if r else 0) + 1
             until = time.time() + LOCK_SECONDS if fails >= MAX_FAILS else 0
             self.store.q("INSERT OR REPLACE INTO lockout VALUES ('owner',?,?)", (0 if until else fails, until))
+            mcp_audit.auth("login_failed", ok=False, client=client_id[:12], ip=ip)
+            if until:
+                mcp_audit.auth("lockout", ok=False, ip=ip, minutes=LOCK_SECONDS // 60)
             return None, "Wrong password."
         self.store.q("DELETE FROM lockout WHERE k='owner'")
         self.store.q("DELETE FROM pending WHERE id=?", (rid,))
@@ -196,6 +235,7 @@ class OwnerOAuthProvider:
             redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
             resource=params.resource or self.resource, subject="owner")
         self.store.q("INSERT INTO codes VALUES (?,?,?)", (_h(code), ac.model_dump_json(), ac.expires_at))
+        mcp_audit.auth("signed_in", client=client_id[:12], ip=ip)
         return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state), None
 
     def deny(self, rid: str) -> str | None:
@@ -203,6 +243,7 @@ class OwnerOAuthProvider:
         if not p:
             return None
         self.store.q("DELETE FROM pending WHERE id=?", (rid,))
+        mcp_audit.auth("sign_in_denied", client=p[0][:12])
         return construct_redirect_uri(str(p[1].redirect_uri), error="access_denied", state=p[1].state)
 
     # codes → tokens ----------------------------------------------------------
@@ -236,6 +277,7 @@ class OwnerOAuthProvider:
         row = r[0]
         if row["used"]:                                # replay of a rotated token → kill the grant
             self.store.q("DELETE FROM tokens WHERE grant_id=?", (row["grant_id"],))
+            mcp_audit.auth("refresh_replay", ok=False, client=row["client_id"][:12], grant=row["grant_id"])
             return None
         if row["expires"] < time.time():
             return None
@@ -262,6 +304,7 @@ class OwnerOAuthProvider:
         r = self.store.q("SELECT grant_id FROM tokens WHERE hash=?", (_h(token.token),))
         if r:
             self.store.q("DELETE FROM tokens WHERE grant_id=?", (r[0]["grant_id"],))
+            mcp_audit.auth("revoked", grant=r[0]["grant_id"])
 
 
 # ── sign-in page ──────────────────────────────────────────────────────────────
@@ -328,7 +371,8 @@ def install_routes(mcp, provider: OwnerOAuthProvider):
         if form.get("action") == "deny":
             url = provider.deny(rid)
             return RedirectResponse(url, status_code=302) if url else HTMLResponse("Cancelled.", headers=headers)
-        url, err = provider.complete_login(rid, str(form.get("password", "")))
+        ip = request.headers.get("cf-connecting-ip") or (request.client.host if request.client else None)
+        url, err = provider.complete_login(rid, str(form.get("password", "")), ip)
         if url:
             return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
         status, body = login_page(provider, rid, err)
@@ -358,7 +402,7 @@ class SourceIPGate:
         self.app, self.cidrs = app, cidrs
 
     def allowed(self, path: str, headers: dict, peer: str | None) -> bool:
-        if path in OPEN_PATHS or path.startswith(tuple(p + "/" for p in OPEN_PATHS)):
+        if path in OPEN_PATHS:                       # exact: no sub-paths exist, so none are opened
             return True
         raw = headers.get(b"cf-connecting-ip", b"").decode().strip() or peer or ""
         try:
@@ -370,8 +414,11 @@ class SourceIPGate:
         return any(ip in n for n in self.cidrs)
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and not self.allowed(scope.get("path", ""), dict(scope.get("headers") or []),
-                                                        (scope.get("client") or (None,))[0]):
+        headers = dict(scope.get("headers") or [])
+        peer = (scope.get("client") or (None,))[0]
+        if scope["type"] == "http" and not self.allowed(scope.get("path", ""), headers, peer):
+            mcp_audit.auth("ip_blocked", ok=False, path=scope.get("path", "")[:60],
+                           ip=headers.get(b"cf-connecting-ip", b"").decode()[:45] or peer)
             await send({"type": "http.response.start", "status": 403,
                         "headers": [(b"content-type", b"text/plain"), (b"cache-control", b"no-store")]})
             await send({"type": "http.response.body", "body": b"Forbidden"})
@@ -404,7 +451,8 @@ def _cli():
         print("Sign-in unlocked.")
     elif cmd == "revoke-all":
         store.q("DELETE FROM tokens")
-        print("All tokens revoked.")
+        mcp_audit.auth("revoke_all")
+        print("All tokens revoked. Claude can connect again (sign in from claude.ai).")
     else:
         print(__doc__)
 
