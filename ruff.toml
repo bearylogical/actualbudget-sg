@@ -1,0 +1,7 @@
+# Correctness-only lint (pyflakes + syntax errors): unused/undefined names, bad f-strings, etc.
+# No style rules — the codebase has its own compact style.
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["F", "E9"]

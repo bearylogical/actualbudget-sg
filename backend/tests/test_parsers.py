@@ -78,7 +78,6 @@ def test_finalise_skips_pending_and_suffixes_identical_rows():
 
 def test_uob_card_pending_rows_are_held_back():
     from parsers import parse_statement
-    import io
     df = uob_df()
     df.iloc[3, 1] = None          # Shopee row: no posting date = pending
     for i in (4, 5, 6):

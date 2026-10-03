@@ -20,7 +20,7 @@ case "${1:-}" in
   *) echo "usage: $0 [--up]" >&2; exit 2 ;;
 esac
 
-env_get() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 | tr -d '"'"'" || true; }
+env_get() { [ -f "$ENV_FILE" ] || return 0; sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 | tr -d '"'"'"; }
 
 url=$(env_get ACTUAL_SERVER_URL)
 if [ -z "$url" ]; then

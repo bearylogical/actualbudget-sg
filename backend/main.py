@@ -6,7 +6,7 @@ import pandas as pd
 import io
 import os
 import httpx
-from parsers import parse_bytes, parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
+from parsers import parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
 import accounts as acct
 from actual_rules import ActualContext
 from pipeline import enrich
@@ -993,26 +993,26 @@ async def finance_trends(months: int = 12):
 import asyncio
 import logging
 
-import audit
+import audit as mcp_audit
 
 
 @app.post("/audit/mcp")
 async def audit_ingest(body: dict):
-    await run_in_threadpool(audit.record, body)
+    await run_in_threadpool(mcp_audit.record, body)
     return {"ok": True}
 
 
 @app.get("/audit/mcp")
 async def audit_summary(hours: float = 24):
     import time as _time
-    return await run_in_threadpool(audit.summarize, _time.time() - hours * 3600)
+    return await run_in_threadpool(mcp_audit.summarize, _time.time() - hours * 3600)
 
 
 @app.post("/audit/mcp/digest")
 async def audit_digest(force: bool = True, send: bool = True):
     """Send the Telegram digest now (force) — or send=false to preview the text."""
     try:
-        r = await run_in_threadpool(audit.digest, force, send)
+        r = await run_in_threadpool(mcp_audit.digest, force, send)
     except (httpx.HTTPError, RuntimeError) as e:
         raise HTTPException(502, str(e))
     return {k: v for k, v in r.items() if k != "summary"}
@@ -1021,7 +1021,7 @@ async def audit_digest(force: bool = True, send: bool = True):
 async def _audit_digest_loop():
     while True:
         try:
-            await run_in_threadpool(audit.digest)
+            await run_in_threadpool(mcp_audit.digest)
         except Exception as e:                      # keep going; the next tick retries
             logging.getLogger("audit").warning("audit digest failed: %s", e)
         await asyncio.sleep(300)
@@ -1029,5 +1029,5 @@ async def _audit_digest_loop():
 
 @app.on_event("startup")
 async def _start_audit_digest():
-    if audit.telegram_configured():
+    if mcp_audit.telegram_configured():
         asyncio.create_task(_audit_digest_loop())

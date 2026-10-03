@@ -18,6 +18,13 @@ docker compose up           # start without rebuilding
 docker compose down         # stop all services
 ```
 
+### Tests & lint (also run by `.github/workflows/ci.yml` on every PR)
+```bash
+make test     # backend/tests (incl. scheduler), mcp/tests (incl. live OAuth e2e), actual-bridge node tests
+make lint     # ruff, correctness rules only (ruff.toml)
+```
+Backend and MCP pin conflicting uvicorn versions — use separate venvs (`make test PYTHON=... MCP_PYTHON=...`).
+
 ### Frontend (SvelteKit) — local dev only
 ```bash
 cd frontend

@@ -6,12 +6,14 @@
 #   make check     compare the Actual server's version with the bridge's @actual-app/api
 #   make health    show service health
 #   make down      stop everything
+#   make test      run all test suites locally (same as CI; needs the Python/Node deps installed)
+#   make lint      ruff (correctness rules only, see ruff.toml)
 #
 # The bridge build installs the @actual-app/api that matches $ACTUAL_SERVER_URL/info
 # (see actual-bridge/Dockerfile); `check` makes sure ACTUAL_SERVER_URL is in .env first.
 
 .NOTPARALLEL:
-.PHONY: up bridge check build build-bridge start start-bridge load health down
+.PHONY: up bridge check build build-bridge start start-bridge load health down test lint
 
 COMPOSE ?= docker compose
 
@@ -50,3 +52,15 @@ health:
 
 down:
 	$(COMPOSE) down
+
+# backend and mcp pin conflicting uvicorn versions, so they usually live in separate venvs.
+PYTHON ?= python3
+MCP_PYTHON ?= $(PYTHON)
+
+test:
+	cd backend && $(PYTHON) -m pytest -q
+	$(MCP_PYTHON) -m pytest -q mcp/tests
+	cd actual-bridge && npm test
+
+lint:
+	ruff check .
