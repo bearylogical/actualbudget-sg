@@ -143,7 +143,7 @@ curl -si -X POST https://budget-mcp.mangk.uk/mcp | head -1                      
 2. Name it `Budget app`. The URL is `https://budget-mcp.mangk.uk/mcp` (exactly, with `/mcp`).
 3. Leave the OAuth client ID and secret empty, because Claude registers itself.
 4. Click **Connect**. Your sign-in page opens ("Allow Claude to read your budget?"). Enter the owner password and click **Allow**.
-5. The tools appear: `weekly_snapshot`, `money_summary`, `list_accounts`, `review_pending`, `list_categories`, `review_memory`, `ibkr_to_ghostfolio_preview`, `health`.
+5. The tools appear: `weekly_snapshot`, `money_summary`, `get_transactions`, `monthly_trends`, `list_accounts`, `review_pending`, `list_categories`, `review_memory`, `ibkr_to_ghostfolio_preview`, `health`.
 
 Then open the **Weekly Money & Portfolio Report** scheduled task, attach the connector and turn
 off **Require this computer**.
