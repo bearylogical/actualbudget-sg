@@ -10,7 +10,10 @@ A 4-service personal finance app that parses Singapore bank statements (UOB, DBS
 
 ### Running the full stack
 ```bash
-docker compose up --build   # build and start all services
+make up                     # version check → build → start (--wait) → load budget → health
+make bridge                 # same, actual-bridge only (after upgrading Actual)
+make check / make health    # compare Actual/api versions; show service health
+docker compose up --build   # build and start all services, no checks
 docker compose up           # start without rebuilding
 docker compose down         # stop all services
 ```
@@ -72,7 +75,7 @@ The **Scheduler** is a 4th service that watches a directory for `.xls/.xlsx` fil
 
 ## Actual Bridge Notes
 
-- `@actual-app/api` must match the running Actual Budget server version. The bridge build reads `$ACTUAL_SERVER_URL/info` (from `.env`) and installs the matching version, so `docker compose up --build` after an Actual upgrade is enough; `ACTUAL_API_VERSION` in `.env` overrides it. `scripts/actual-version.sh` compares the two (`--up` rebuilds the bridge).
+- `@actual-app/api` must match the running Actual Budget server version. The bridge build reads `$ACTUAL_SERVER_URL/info` (from `.env`) and installs the matching version, so `make bridge` (or `docker compose up --build`) after an Actual upgrade is enough; `ACTUAL_API_VERSION` in `.env` overrides it. `make check` (`scripts/actual-version.sh`) compares the two.
 - The bridge maintains in-memory state (server URL, password, loaded budget). Restarting the bridge requires re-authenticating from the UI.
 - Unhandled promise rejections are caught globally to prevent crashes from Actual API quirks.
 

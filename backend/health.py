@@ -89,7 +89,7 @@ async def check_bridge(bridge_url: str, client: httpx.AsyncClient) -> tuple[dict
         if srv.get("versionMatch") is False:
             server["status"] = "degraded"
             server["detail"] = (f"server {srv.get('version')} ≠ @actual-app/api {d.get('apiVersion')} — "
-                                "rebuild the bridge: scripts/actual-version.sh --up")
+                                "rebuild the bridge: make bridge")
         if not d.get("budgetLoaded"):
             server["detail"] = (server.get("detail", "") + " no budget loaded").strip()
     return bridge, server

@@ -5,8 +5,13 @@ Parse Singapore bank statements (UOB card, POSB/DBS, OCBC) and import them into 
 ## Quick Start
 
 ```bash
-docker compose up --build
+make up
 ```
+
+This checks your Actual server's version, builds, starts everything (waiting for the
+healthchecks), loads your saved budget and prints service health, in that order.
+`make bridge` does the same for the bridge only (after upgrading Actual). All targets are
+listed at the top of the `Makefile`. Plain `docker compose up --build` still works.
 
 Open **http://localhost:3000**
 

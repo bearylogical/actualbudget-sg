@@ -49,5 +49,5 @@ if [ "$up" = 1 ]; then
   docker compose up -d --build actual-bridge
   echo "Bridge rebuilt. The backend reloads the saved budget on the next request."
 elif [ -n "$server" ] && [ "$server" != "$bridge" ]; then
-  echo "Mismatch — run: $0 --up   (or docker compose up -d --build)"
+  echo "Mismatch — run: make bridge"
 fi
