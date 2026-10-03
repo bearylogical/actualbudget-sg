@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 import ibkr_ghostfolio as m
 
 POS = [{"contract_description": "VWRA @LSEETF", "position": 20, "currency": "USD", "average_price": 150.0, "asset_class": "STK"},
@@ -41,3 +43,13 @@ def test_positions_and_opening_lots():
     assert d == {"VWRA.L": 5.0, "VWCE.DE": 5.0, "GOOGL": 3.0, "ES3.SI": -1.0}
     lots = m.opening_lots(POS, diffs, "acc", "2026-01-01", {})
     assert {(l["symbol"], l["quantity"], l["unitPrice"]) for l in lots} == {("VWRA.L", 5.0, 150.0), ("VWCE.DE", 5.0, 100.0), ("GOOGL", 3.0, 120.0)}
+
+
+def test_dedup_matches_hand_entered_local_midnight():
+    acts = m.map_trades(TRADES, POS, "acc", {"XYZ": "XYZ.DE"})["activities"]
+    vwra = next(a for a in acts if a["symbol"] == "VWRA.L")
+    prev_day = date.fromisoformat(vwra["date"][:10]) - timedelta(days=1)
+    existing = [{"comment": None, "date": f"{prev_day}T16:00:00.000Z", "type": "BUY",
+                 "quantity": vwra["quantity"], "assetProfile": {"symbol": "VWRA.L"}}]
+    new, dup = m.already_imported(acts, existing)
+    assert [a["symbol"] for a in dup] == ["VWRA.L"] and [a["symbol"] for a in new] == ["XYZ.DE"]
