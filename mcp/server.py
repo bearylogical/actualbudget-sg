@@ -15,12 +15,17 @@ Run (public, claude.ai connector): MCP_PUBLIC_URL=https://budget-mcp.example.com
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
 import json
 import os
+import time
 from urllib.parse import urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+import mcp_audit
 
 API = os.getenv("BUDGET_APP_URL", "http://127.0.0.1:8000").rstrip("/")
 # MCP_READ_ONLY=true: only reading tools are exposed (use this for scheduled reports)
@@ -45,7 +50,8 @@ if PUBLIC_URL:
                          "make one with `python oauth.py hash`. Refusing to start a public server without sign-in.")
     READ_ONLY = True
     _provider = oauth.OwnerOAuthProvider(PUBLIC_URL, _pw, Path(os.getenv("DATA_DIR", "/data")),
-                                         allow_loopback=os.getenv("MCP_ALLOW_LOOPBACK", "false").lower() == "true")
+                                         allow_loopback=os.getenv("MCP_ALLOW_LOOPBACK", "false").lower() == "true",
+                                         single_grant=os.getenv("MCP_SINGLE_GRANT", "true").lower() != "false")
     _kwargs = dict(
         auth_server_provider=_provider,
         auth=AuthSettings(
@@ -61,9 +67,54 @@ if PUBLIC_URL:
     oauth.install_routes(mcp, _provider)
 
 
+def _client_id() -> str | None:
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+        t = get_access_token()
+        return t.client_id[:12] if t else None
+    except Exception:
+        return None
+
+
+def _audited(f, write: bool):
+    """Wrap a tool so every call lands in the audit trail (tool, summarised args, client, result)."""
+    sig = inspect.signature(f)
+
+    @functools.wraps(f)
+    def wrapper(*a, **kw):
+        t0, ok, err = time.monotonic(), True, None
+        try:
+            r = f(*a, **kw)
+            if isinstance(r, dict) and r.get("error"):
+                ok, err = False, str(r["error"])
+            return r
+        except Exception as e:
+            ok, err = False, repr(e)
+            raise
+        finally:
+            try:
+                args = dict(sig.bind_partial(*a, **kw).arguments)
+            except TypeError:
+                args = {}
+            mcp_audit.tool(f.__name__, args, write, ok, err, int((time.monotonic() - t0) * 1000), _client_id())
+    return wrapper
+
+
+def read_tool():
+    """Register a read-only tool (audited). Returns the plain function, so internal calls aren't logged."""
+    def deco(f):
+        mcp.tool()(_audited(f, write=False))
+        return f
+    return deco
+
+
 def write_tool():
-    """Register a tool that changes data — skipped entirely in read-only mode."""
-    return (lambda f: f) if READ_ONLY else mcp.tool()
+    """Register a tool that changes data (audited) — skipped entirely in read-only mode."""
+    def deco(f):
+        if not READ_ONLY:
+            mcp.tool()(_audited(f, write=True))
+        return f
+    return deco
 
 
 def _req(method: str, path: str, body: dict | None = None, timeout: float = 300):
@@ -81,7 +132,7 @@ def _money(c):
     return None if c is None else round(c / 100, 2)
 
 
-@mcp.tool()
+@read_tool()
 def money_summary() -> dict:
     """Net worth, cash, card owed, investments (Ghostfolio), savings rate, this month's pace,
     safe-to-spend and the guidance list. Amounts in SGD."""
@@ -102,7 +153,7 @@ def money_summary() -> dict:
     }
 
 
-@mcp.tool()
+@read_tool()
 def list_accounts() -> dict:
     """Actual accounts with ids and balances in SGD (use the id for reconcile_account)."""
     d = _req("GET", "/actual/accounts")
@@ -112,7 +163,7 @@ def list_accounts() -> dict:
                           "offbudget": a.get("offbudget"), "closed": a.get("closed")} for a in d.get("accounts", [])]}
 
 
-@mcp.tool()
+@read_tool()
 def review_pending(kind: str = "") -> dict:
     """Items waiting for approval: possible duplicates, unlinked transfers, reconciliation fixes,
     category fixes. kind: '' | import_duplicate | existing_duplicate | transfer_pair | reconcile_fix | recategorize"""
@@ -134,7 +185,7 @@ def category_scan(days: int = 120, mode: str = "uncategorised", use_llm: bool = 
     return _req("POST", "/review/recategorize/scan", {"days": days, "mode": mode, "use_llm": use_llm})
 
 
-@mcp.tool()
+@read_tool()
 def list_categories() -> dict:
     """Actual category groups and categories (ids for review_decide's category_id)."""
     return _req("GET", "/actual/categories")
@@ -159,7 +210,7 @@ def review_decide(item_id: str, decision: str, category_id: str = "") -> dict:
     return _req("POST", f"/review/{item_id}/decide", body)
 
 
-@mcp.tool()
+@read_tool()
 def review_memory() -> dict:
     """Patterns learned from past decisions (and how many times each was confirmed)."""
     return _req("GET", "/review/memory")
@@ -189,7 +240,7 @@ def reconcile_account(account_id: str, bank_balance: float, as_of: str = "", use
             "queued_for_review": [q["id"] for q in d.get("queued", [])], "explanation": d.get("explanation")}
 
 
-@mcp.tool()
+@read_tool()
 def ibkr_to_ghostfolio_preview(trades_json: str, positions_json: str, account_id: str = "") -> dict:
     """Preview syncing IBKR into Ghostfolio. Pass the raw JSON from the IBKR connector:
     get_account_trades (use YEAR_TO_DATE or the quarter periods) and get_account_positions.
@@ -204,17 +255,31 @@ def ibkr_to_ghostfolio_preview(trades_json: str, positions_json: str, account_id
 
 
 @write_tool()
-def ibkr_to_ghostfolio_import(activities_json: str, positions_json: str = "") -> dict:
+def ibkr_to_ghostfolio_import(activities_json: str, positions_json: str = "", account_id: str = "") -> dict:
     """Import previewed activities (the `new` list, optionally plus `suggested_opening_lots`) into
-    Ghostfolio. Only call after the user approved the preview."""
+    Ghostfolio. Only call after the user approved the preview. Pass the activities unchanged: each is
+    linked to the IBKR account, ones already in Ghostfolio are skipped, and the account's cash balance
+    is then set to 0 so Ghostfolio tracks stocks/ETFs only (cash is tracked in Actual).
+    Returns imported / already_imported counts, cash_cleared and position_diff_after."""
     acts = json.loads(activities_json)
     positions = json.loads(positions_json) if positions_json else []
     return _req("POST", "/investments/ibkr/import", {
-        "activities": acts,
-        "positions": positions.get("positions", positions) if isinstance(positions, dict) else positions})
+        "activities": acts.get("new", acts) if isinstance(acts, dict) else acts,
+        "positions": positions.get("positions", positions) if isinstance(positions, dict) else positions,
+        "account_id": account_id or None})
 
 
-@mcp.tool()
+@write_tool()
+def ghostfolio_clear_cash(apply: bool = False, account_ids: str = "") -> dict:
+    """Zero the cash balance of Ghostfolio accounts so it tracks stocks/ETFs only (bank and broker cash
+    is tracked in Actual). apply=false (default) only lists the accounts holding cash; call with
+    apply=true after the user agreed. account_ids: comma-separated, default all accounts.
+    Activities and holdings are never touched."""
+    ids = [x.strip() for x in account_ids.split(",") if x.strip()]
+    return _req("POST", "/investments/ghostfolio/clear-cash", {"account_ids": ids or None, "dry_run": not apply})
+
+
+@read_tool()
 def weekly_snapshot() -> dict:
     """Everything a weekly money report needs in one call: last 7 days of spending vs your usual
     week (by category, top payees, largest items), month-to-date pace and guidance, net worth /
@@ -233,7 +298,7 @@ def weekly_snapshot() -> dict:
             "note": "amounts in SGD; guidance is about cash flow, not investment advice"}
 
 
-@mcp.tool()
+@read_tool()
 def get_transactions(start: str = "", end: str = "", search: str = "", account: str = "",
                      category: str = "", kind: str = "all", limit: int = 100) -> dict:
     """Historical transactions from Actual, newest first. Read-only.
@@ -250,7 +315,7 @@ def get_transactions(start: str = "", end: str = "", search: str = "", account: 
             "transactions": [{**t, "amount": _money(t["amount"])} for t in d["transactions"]]}
 
 
-@mcp.tool()
+@read_tool()
 def monthly_trends(months: int = 12) -> dict:
     """Month-by-month history for the last N months (max 24): income, spent, net, savings rate,
     spending by category, and Actual balances at each month end (on-budget, off-budget, total;
@@ -265,7 +330,7 @@ def monthly_trends(months: int = 12) -> dict:
     } for x in d["months"]]}
 
 
-@mcp.tool()
+@read_tool()
 def health() -> dict:
     """Status of backend, Actual bridge/server, scheduler, LLM and Ghostfolio."""
     d = _req("GET", "/health")

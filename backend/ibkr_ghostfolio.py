@@ -24,6 +24,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+from ghostfolio import is_cash
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 SYMBOL_MAP_FILE = DATA_DIR / "symbol_map.json"
 
@@ -141,8 +143,7 @@ def compare_positions(positions: list[dict], holdings: list[dict], overrides: di
     gf = {}
     for h in holdings or []:
         sym = h.get("symbol")
-        prof = h.get("assetProfile") or h.get("SymbolProfile") or {}
-        if prof.get("assetSubClass") == "CASH" or prof.get("assetClass") == "LIQUIDITY":
+        if is_cash(h):
             continue                     # the account's cash balance, not a security
         if sym:
             gf[sym] = gf.get(sym, 0.0) + float(h.get("quantity") or 0)

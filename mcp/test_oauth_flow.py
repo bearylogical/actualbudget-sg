@@ -57,6 +57,9 @@ r = c.post("/register", json={"redirect_uris": [CB], "client_name": "Claude", "t
                               "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
 ok(r.status_code == 201, f"Claude registered ({r.status_code})")
 client = r.json(); cid = client["client_id"]
+r = c.post("/register", json={"redirect_uris": [CB], "client_name": "Claude", "token_endpoint_auth_method": "none",
+                              "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
+other = r.json()["client_id"]                # a second client, registered before anyone is connected
 
 # 3. authorize → login page
 ver = secrets.token_urlsafe(48)
@@ -88,6 +91,15 @@ r = c.post("/token", data={"grant_type": "authorization_code", "code": code, "re
                            "code_verifier": ver, "resource": BASE + "/mcp"})
 ok(r.status_code == 200, f"token issued ({r.status_code} {r.text[:120]})")
 tok = r.json()
+
+# 5b. single grant: once Claude is connected, nobody else can register or sign in
+r = c.post("/register", json={"redirect_uris": [CB], "client_name": "Claude", "token_endpoint_auth_method": "none",
+                              "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
+ok(r.status_code == 400 and "already connected" in r.text, f"new registration refused while connected ({r.status_code})")
+r = c.get("/authorize", params={"response_type": "code", "client_id": other, "redirect_uri": CB, "state": "x",
+                                "code_challenge": chal, "code_challenge_method": "S256", "scope": "budget:read"})
+ok(r.status_code in (302, 400) and "/login?req=" not in r.headers.get("location", ""),
+   f"other client can't reach sign-in while connected ({r.status_code} {r.headers.get('location', '')[:60]})")
 r = c.post("/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": CB, "client_id": cid, "code_verifier": ver})
 ok(r.status_code == 400, "code is single-use")
 
