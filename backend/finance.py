@@ -213,3 +213,91 @@ def week(rows: list[dict], categories: dict[str, str], today: date | None = None
                           "amount": -sum(t["amount"] for t in this if not t.get("category"))},
         "transactions": len(this),
     }
+
+
+def _flow(t: dict) -> bool:
+    """A real money movement: not a transfer, starting balance or split child (the parent carries the total)."""
+    return not (t.get("transfer_id") or t.get("payee_transfer_acct") or t.get("starting_balance_flag")
+                or t.get("is_child"))
+
+
+TXN_KINDS = ("all", "spend", "income", "transfer")
+
+
+def transactions(rows: list[dict], categories: dict[str, str], q: str = "", account: str = "",
+                 category: str = "", kind: str = "all", limit: int = 200) -> dict:
+    """
+    Filter raw Actual rows (bridge /txns/range), newest first. q matches payee / imported payee /
+    notes; account and category match id or name (case-insensitive substring). Totals cover every
+    match, not just the returned page. Money in cents.
+    """
+    q, account, category = q.lower().strip(), account.lower().strip(), category.lower().strip()
+    cat = lambda t: categories.get(t.get("category"), "Uncategorised" if _flow(t) else "Transfer")
+
+    def keep(t):
+        if t.get("is_child"):
+            return False
+        is_transfer = not _flow(t) and not t.get("starting_balance_flag")
+        if kind == "spend" and (t["amount"] >= 0 or not _flow(t)):
+            return False
+        if kind == "income" and (t["amount"] <= 0 or not _flow(t)):
+            return False
+        if kind == "transfer" and not is_transfer:
+            return False
+        if account and account not in (t.get("account") or "").lower() and account not in (t.get("account_name") or "").lower():
+            return False
+        if category and category != (t.get("category") or "").lower() and category not in cat(t).lower():
+            return False
+        if q and not any(q in (t.get(k) or "").lower() for k in ("payee", "imported_payee", "notes")):
+            return False
+        return True
+
+    hits = sorted((t for t in rows if keep(t)), key=lambda t: (t["date"], t["id"]), reverse=True)
+    page = hits[:max(1, limit)]
+    return {
+        "count": len(hits), "returned": len(page), "truncated": len(hits) > len(page),
+        "money_out": -sum(t["amount"] for t in hits if t["amount"] < 0 and _flow(t)),
+        "money_in": sum(t["amount"] for t in hits if t["amount"] > 0 and _flow(t)),
+        "transactions": [{"id": t["id"], "date": t["date"], "amount": t["amount"], "payee": t.get("payee"),
+                          "account": t.get("account_name"), "category": cat(t), "notes": t.get("notes"),
+                          "transfer": not _flow(t) and not t.get("starting_balance_flag"),
+                          "offbudget": t.get("offbudget", False)} for t in page],
+    }
+
+
+def trends(actual: dict, rows: list[dict], today: date | None = None) -> dict:
+    """
+    Month-by-month history: income / spent / net and spending by category from Actual's budget
+    months (bridge /finance/summary), plus each account group's balance at month end, worked
+    back from today's balances with the rows (bridge /txns/range) dated after that month.
+    Investments (Ghostfolio) have no history here. Money in cents.
+    """
+    today = today or date.fromisoformat(actual.get("today") or date.today().isoformat())
+    months = [m for m in actual["months"] if "error" not in m]
+    while months and not months[0]["income"] and not months[0]["spent"]:
+        months.pop(0)
+    accts = [a for a in actual["accounts"] if a.get("balance") is not None]
+    later: dict[str, list[tuple[str, int]]] = {a["id"]: [] for a in accts}
+    for t in rows:
+        if not t.get("is_child") and t.get("account") in later:
+            later[t["account"]].append((t["date"], t["amount"]))
+
+    out = []
+    for m in months:
+        y, mo = map(int, m["month"].split("-"))
+        month_end = date(y, mo, calendar.monthrange(y, mo)[1])
+        end = min(month_end, today).isoformat()
+        bal = {a["id"]: a["balance"] - sum(amt for d, amt in later[a["id"]] if d > end) for a in accts}
+        on = sum(bal[a["id"]] for a in accts if not a["offbudget"])
+        off = sum(bal[a["id"]] for a in accts if a["offbudget"])
+        spent = -m["spent"]
+        cats = sorted(({"name": c["name"], "group": c["group"], "spent": -c["spent"]}
+                       for c in m["categories"] if not c["is_income"] and c["spent"]), key=lambda c: -c["spent"])
+        out.append({
+            "month": m["month"], "partial": month_end > today,
+            "income": m["income"], "spent": spent, "net": m["income"] - spent,
+            "savings_rate": (m["income"] - spent) / m["income"] if m["income"] > 0 else None,
+            "budgeted": m["budgeted"], "categories": cats,
+            "balance_end": {"on_budget": on, "off_budget": off, "total": on + off, "as_of": end},
+        })
+    return {"months": out, "note": "balances are Actual accounts only (open accounts); investments not included"}

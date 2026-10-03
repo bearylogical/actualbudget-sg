@@ -1,6 +1,6 @@
 """
 Budget-app MCP server — lets Claude (Desktop / Cowork) work with the review queue,
-reconciliation, the Money summary and the IBKR → Ghostfolio sync.
+reconciliation, the Money summary, transaction history and the IBKR → Ghostfolio sync.
 
 It is a thin client over the budget-app backend's HTTP API, so every safety rule
 of the app still applies: deletions and balance fixes only happen through
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from urllib.parse import urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -230,6 +231,38 @@ def weekly_snapshot() -> dict:
                 "uncategorised": {**week["uncategorised"], "amount": _money(week["uncategorised"]["amount"])}}
     return {"week": week, "month": summary, "review": review, "health": h,
             "note": "amounts in SGD; guidance is about cash flow, not investment advice"}
+
+
+@mcp.tool()
+def get_transactions(start: str = "", end: str = "", search: str = "", account: str = "",
+                     category: str = "", kind: str = "all", limit: int = 100) -> dict:
+    """Historical transactions from Actual, newest first. Read-only.
+    start/end: YYYY-MM-DD (default: the last 30 days). search: matches payee or notes.
+    account / category: id or part of the name. kind: all | spend | income | transfer.
+    limit: rows returned (max 500); count, money_in and money_out cover every match.
+    Amounts in SGD: negative = money out."""
+    qs = urlencode({"start": start, "end": end, "q": search, "account": account,
+                    "category": category, "kind": kind, "limit": limit})
+    d = _req("GET", f"/finance/transactions?{qs}")
+    if "error" in d:
+        return d
+    return {**d, "money_in": _money(d["money_in"]), "money_out": _money(d["money_out"]),
+            "transactions": [{**t, "amount": _money(t["amount"])} for t in d["transactions"]]}
+
+
+@mcp.tool()
+def monthly_trends(months: int = 12) -> dict:
+    """Month-by-month history for the last N months (max 24): income, spent, net, savings rate,
+    spending by category, and Actual balances at each month end (on-budget, off-budget, total;
+    investments not included). For charts of cash flow and net worth over time. Amounts in SGD."""
+    d = _req("GET", f"/finance/trends?months={int(months)}")
+    if "error" in d:
+        return d
+    return {"note": d["note"], "months": [{
+        **x, **{k: _money(x[k]) for k in ("income", "spent", "net", "budgeted")},
+        "categories": [{**c, "spent": _money(c["spent"])} for c in x["categories"]],
+        "balance_end": {k: (v if k == "as_of" else _money(v)) for k, v in x["balance_end"].items()},
+    } for x in d["months"]]}
 
 
 @mcp.tool()

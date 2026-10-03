@@ -13,9 +13,10 @@ Call everything that's available in one batch. If a source is missing or errors,
 | Source | Calls | Gives |
 |---|---|---|
 | budget-app MCP | `weekly_snapshot` (includes the month summary, review queue and health). If it errors, fall back to `money_summary` + `health`. | net worth, cash, card owed, investments, savings rate, emergency months, month pace, safe-to-spend, categories vs usual, last 7 days, accounts, guidance, pending reviews, service status |
+| budget-app MCP (history) | `monthly_trends(12)`; `get_transactions` (e.g. `kind="spend"`, this month, `limit=20`) for the largest or most recent items | income / spent / net / savings rate and spending by category per month, Actual balances at each month end; individual transactions |
 | Interactive Brokers connector | `get_account_summary`, `get_account_balances`, `get_account_positions`, `get_pa_performance_all_periods`, `get_pa_allocation` | portfolio value, cash by currency, positions with P&L, returns by period, allocation |
 | Ghostfolio MCP (if connected) | holdings and performance (read tools only) | holdings across all accounts, performance |
-| Actual MCP (if connected) | `net-worth`, `cash-flow`, `spending-by-category` for the last 6–12 months (read tools only) | trends for charts |
+| Actual MCP (if connected, optional) | `net-worth`, `cash-flow`, `spending-by-category` (read tools only). Only needed if `monthly_trends` is unavailable. | trends for charts |
 
 Never call write tools (`review_decide`, `ibkr_to_ghostfolio_import`, `create-*`, `update-*`, `delete-*`, `set-*`, order or alert tools).
 
@@ -38,7 +39,7 @@ Sections, top to bottom:
 6. **Portfolio:** IBKR value and cash by currency; positions table (symbol, qty, price, value, unrealised P&L, % of portfolio); allocation chart; returns by period.
 7. **Drift:** IBKR vs Ghostfolio differences, or "in sync".
 8. **To do:** guidance items, pending review count by kind, unhealthy services.
-9. **Trends** (only if the Actual MCP gave history): net worth and monthly cash flow over time.
+9. **Trends** (from `monthly_trends`, or the Actual MCP as a fallback): monthly income vs spent (bars) with net and savings rate, Actual balance at month end over time (line), and the top categories over the months. Mark the current month as partial. These balances are Actual accounts only. Don't add today's investment value to past months, because there's no history for it.
 
 Keep it scannable: one screen of KPIs, details below, works at phone width.
 

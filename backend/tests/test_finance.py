@@ -112,3 +112,43 @@ def test_week_vs_usual():
     assert w["categories"][0] == {"category": "Uncategorised", "spent": 20000, "usual_week": 0}
     assert w["uncategorised"] == {"count": 1, "amount": 20000}
     assert w["largest"][0]["payee"] == "Shopee"
+
+
+TXNS = [
+    {"id": "1", "date": "2026-09-25", "amount": -5000, "category": "c1", "payee": "Koufu", "account": "sav", "account_name": "UOB One Account"},
+    {"id": "2", "date": "2026-09-24", "amount": -20000, "category": None, "payee": "Shopee", "notes": "headphones", "account": "card", "account_name": "UOB One Card"},
+    {"id": "3", "date": "2026-09-23", "amount": -150000, "transfer_id": "x", "payee": "UOB One Card", "account": "sav", "account_name": "UOB One Account"},
+    {"id": "4", "date": "2026-09-01", "amount": 800000, "category": "inc", "payee": "Salary", "account": "sav", "account_name": "UOB One Account"},
+    {"id": "5", "date": "2026-08-10", "amount": -8000, "category": "c1", "payee": "Koufu", "account": "sav", "account_name": "UOB One Account"},
+    {"id": "6", "date": "2026-08-10", "amount": -3000, "is_child": True, "category": "c1", "account": "sav"},   # split child: skipped
+    {"id": "7", "date": "2026-07-31", "amount": 10_000, "category": "inc", "payee": "Dividend", "account": "cpf", "account_name": "CPF OA", "offbudget": True},
+]
+NAMES = {"c1": "Dining & Hawker", "inc": "Salary"}
+
+
+def test_transactions_filters_and_totals():
+    r = finance.transactions(TXNS, NAMES)
+    assert r["count"] == 6 and [t["id"] for t in r["transactions"]][:3] == ["1", "2", "3"]
+    assert r["money_out"] == 33000 and r["money_in"] == 810_000          # transfer excluded from totals
+    assert finance.transactions(TXNS, NAMES, kind="spend")["count"] == 3
+    assert [t["id"] for t in finance.transactions(TXNS, NAMES, kind="transfer")["transactions"]] == ["3"]
+    assert finance.transactions(TXNS, NAMES, q="HEADPHONES")["transactions"][0]["category"] == "Uncategorised"
+    assert finance.transactions(TXNS, NAMES, category="dining")["count"] == 2
+    assert finance.transactions(TXNS, NAMES, account="card")["count"] == 1
+    page = finance.transactions(TXNS, NAMES, limit=2)
+    assert page["returned"] == 2 and page["truncated"] and page["count"] == 6
+
+
+def test_trends_months_and_month_end_balances():
+    actual = {**ACTUAL, "today": "2026-09-30"}
+    r = finance.trends(actual, TXNS, today=date(2026, 9, 30))
+    assert [m["month"] for m in r["months"]] == ["2026-06", "2026-07", "2026-08", "2026-09"]   # empty May dropped
+    aug = next(m for m in r["months"] if m["month"] == "2026-08")
+    assert aug["spent"] == 300_000 and aug["net"] == 500_000 and aug["savings_rate"] == 0.625
+    assert aug["categories"][0] == {"name": "Dining", "group": "G", "spent": 60_000}
+    # end of Aug = today's balance minus September's rows (salary in, Koufu/transfer out; card's Shopee)
+    assert aug["balance_end"]["on_budget"] == (2_000_000 - (800_000 - 5000 - 150_000)) + (-150_000 + 20_000)
+    jul = next(m for m in r["months"] if m["month"] == "2026-07")
+    assert jul["balance_end"]["off_budget"] == 5_000_000                  # dividend dated 31 Jul is inside July
+    assert r["months"][-1]["balance_end"]["total"] == 2_000_000 - 150_000 + 5_000_000
+    assert not r["months"][-1]["partial"]
