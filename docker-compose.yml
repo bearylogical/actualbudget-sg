@@ -18,7 +18,13 @@ x-llm-env: &llm-env
 
 services:
   actual-bridge:
-    build: ./actual-bridge
+    build:
+      context: ./actual-bridge
+      # @actual-app/api is matched to your server's version at build time (see the
+      # Dockerfile). ACTUAL_API_VERSION in .env overrides it.
+      args:
+        ACTUAL_INFO_URL: "${ACTUAL_SERVER_URL:+${ACTUAL_SERVER_URL}/info}"
+        ACTUAL_API_VERSION: "${ACTUAL_API_VERSION:-}"
     container_name: budget-actual-bridge
     restart: unless-stopped
     volumes:

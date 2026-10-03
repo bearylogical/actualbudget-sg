@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import httpx
+
+import connection
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -12,11 +15,54 @@ class BridgeError(RuntimeError):
     pass
 
 
-def call(method: str, path: str, body: dict | None = None, timeout: float = 120) -> dict:
+NO_BUDGET = "No budget loaded"
+_reload_lock = threading.Lock()
+
+
+def is_no_budget(status: int, error: str | None) -> bool:
+    return status == 400 and error == NO_BUDGET
+
+
+def reload_saved_budget() -> bool:
+    """Reload the budget from the saved connection (connection.py). The bridge keeps the loaded
+    budget in memory only, so after a bridge restart every read fails with "No budget loaded"
+    until someone reconnects in the UI; this does it for them. False if nothing is saved."""
+    body = connection.load_body()
+    if not body:
+        return False
+    with _reload_lock:                      # concurrent callers share one reload
+        try:
+            if httpx.get(f"{BRIDGE_URL}/health", timeout=5).json().get("budgetLoaded"):
+                return True
+        except Exception:
+            pass
+        try:
+            r = httpx.post(f"{BRIDGE_URL}/budgets/load", json=body, timeout=60)
+        except httpx.HTTPError:
+            return False
+        if not r.is_success:
+            print(f"[bridge] auto-reload of saved budget failed: HTTP {r.status_code} {r.text[:200]}")
+        return r.is_success
+
+
+def _request(method: str, path: str, body: dict | None, timeout: float) -> httpx.Response:
     try:
-        r = httpx.request(method, f"{BRIDGE_URL}{path}", json=body, timeout=timeout)
+        return httpx.request(method, f"{BRIDGE_URL}{path}", json=body, timeout=timeout)
     except httpx.HTTPError as e:
         raise BridgeError(f"actual-bridge unreachable: {e}") from e
+
+
+def _error(r: httpx.Response) -> str | None:
+    try:
+        return r.json().get("error")
+    except (ValueError, AttributeError):
+        return None
+
+
+def call(method: str, path: str, body: dict | None = None, timeout: float = 120) -> dict:
+    r = _request(method, path, body, timeout)
+    if is_no_budget(r.status_code, _error(r)) and reload_saved_budget():
+        r = _request(method, path, body, timeout)
     try:
         data = r.json()
     except ValueError:

@@ -44,8 +44,13 @@ MCP_OWNER_PASSWORD_HASH=scrypt:…
 CLOUDFLARE_TUNNEL_TOKEN=…
 ```
 
-Check `@actual-app/api` in `actual-bridge/package.json` matches your Actual server's version
-(`https://budget.local.mangk.uk/info`) and pin it if it doesn't.
+The bridge's `@actual-app/api` is matched to your Actual server at build time from
+`ACTUAL_SERVER_URL` in `.env`, so after upgrading Actual run `make bridge`.
+To check the two versions (and rebuild with `--up`):
+
+```sh
+make check
+```
 
 ## 2. Move your data from the Mac
 
@@ -66,9 +71,7 @@ scripts/move-data.sh import budget-app-data.tgz && rm budget-app-data.tgz
 ## 3. Start the stack
 
 ```sh
-docker compose up -d --build
-docker compose ps                           # all healthy
-docker compose exec backend python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health').read()[:300])"
+make up      # version check → build → start, waiting until healthy → load budget → health
 ```
 
 Open the UI at `http://<vm>:3000`. Put it behind Traefik if you like (`budget-app.local.mangk.uk`).
