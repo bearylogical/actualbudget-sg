@@ -175,17 +175,17 @@
   $: shown = kindFilter ? items.filter(i => i.kind === kindFilter) : items;
 </script>
 
-<!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
-<div class="overlay" on:click|self={() => dispatch('close')}>
-  <div class="modal">
-    <div class="head">
-      <h3>🧾 Review</h3>
-      <div class="tabs">
-        {#each [['pending', 'Pending'], ['history', 'History'], ['memory', 'What it learned']] as [k, l]}
-          <button class="tab" class:active={tab === k} on:click={() => { tab = k; load(); }}>{l}</button>
-        {/each}
+<div class="view">
+    <div class="view-head">
+      <div>
+        <h1>Review</h1>
+        <p class="muted sub">Possible duplicates, unlinked transfers, reconciliation and category fixes waiting for your call.</p>
       </div>
-      <button class="ghost icon-btn" on:click={() => dispatch('close')}>✕</button>
+    </div>
+    <div class="tabs">
+      {#each [['pending', 'Pending'], ['history', 'History'], ['memory', 'What it learned']] as [k, l]}
+        <button class="tab" class:active={tab === k} on:click={() => { tab = k; load(); }}>{l}</button>
+      {/each}
     </div>
 
     {#if tab === 'pending'}
@@ -287,19 +287,16 @@
         {/each}
       {/if}
     </div>
-  </div>
 </div>
 
 <style>
-  .overlay { position: fixed; inset: 0; background: #00000088; display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; width: 900px; max-width: 96vw; max-height: 90vh; display: flex; flex-direction: column; gap: 10px; padding: 18px; }
-  .head { display: flex; align-items: center; gap: 12px; }
-  .head h3 { font-size: 17px; font-weight: 700; }
-  .tabs { display: flex; gap: 2px; flex: 1; }
-  .tab { background: transparent; border: none; color: var(--text2); padding: 5px 12px; border-radius: 6px; font-size: 13px; }
-  .tab.active { background: var(--surface2); color: var(--accent); }
+  .view { display: flex; flex-direction: column; gap: 14px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-soft); }
+  .tab { background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--text2); padding: 8px 14px; font-size: 14px; font-weight: 500; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
   .item { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
   .item.done { opacity: .7; }
   .item-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }

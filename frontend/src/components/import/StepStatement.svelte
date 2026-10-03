@@ -124,7 +124,7 @@
       <div class="b-body">
         <div><strong>You've uploaded this exact file before</strong> — {new Date(last.created * 1000).toLocaleString('en-SG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })},
           {last.status === 'imported' ? `imported ${last.added} into ${last.account_name || 'Actual'}` : last.status === 'nothing_new' ? 'nothing new was imported' : last.status === 'undone' ? 'later undone' : last.status === 'failed' ? 'it failed' : 'not imported'}{seenBefore.length > 1 ? ` (${seenBefore.length} times in all)` : ''}.
-          Rows already in Actual are skipped either way. <a href="/history">History</a></div>
+          Rows already in Actual are skipped either way. <a href="#history">History</a></div>
       </div>
     </div>
   {/if}
