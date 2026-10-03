@@ -39,7 +39,7 @@ services:
     # Bound to localhost: the backend proxies to your loaded budget with no auth of
     # its own, so it shouldn't be reachable from the LAN. The UI talks to it via nginx.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${BACKEND_PORT:-127.0.0.1:8000}:8000"   # e.g. 127.0.0.1:8010 if 8000 is taken (Portainer)
     volumes:
       - scheduler-data:/data      # category aliases + LLM cache (shared with scheduler)
     environment:
@@ -65,7 +65,7 @@ services:
     container_name: budget-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
       interval: 30s

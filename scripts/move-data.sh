@@ -21,7 +21,10 @@ case "$cmd" in
     ;;
   import)
     in=${2:?usage: move-data.sh import <file.tgz> [--force]}
-    docker volume create "$VOL" >/dev/null
+    # labels = what Compose would set, so it adopts the volume without a warning
+    docker volume inspect "$VOL" >/dev/null 2>&1 || docker volume create \
+      --label com.docker.compose.project=budget-app \
+      --label com.docker.compose.volume=scheduler-data "$VOL" >/dev/null
     if [ "${3:-}" != "--force" ] && [ -n "$(docker run --rm -v "$VOL":/v alpine ls -A /v)" ]; then
       echo "$VOL already has data. Re-run with --force to overwrite it." >&2; exit 1
     fi
