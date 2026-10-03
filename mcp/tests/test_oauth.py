@@ -48,12 +48,13 @@ def test_gate_refuses_outsiders():
     assert not GATE.allowed("/mcp", {}, "203.0.113.7")
     assert not GATE.allowed("/mcp", {}, None)
     assert not GATE.allowed("/register", {b"cf-connecting-ip": b"garbage"}, None)
-    # a prefix of an open path is not an open path
+    # open paths match exactly: no prefixes, no sub-paths
     assert not GATE.allowed("/loginx", {}, "203.0.113.7")
+    assert not GATE.allowed("/login/extra", {}, "203.0.113.7")
 
 
 def test_gate_open_paths_reachable_by_anyone():
-    for p in ("/authorize", "/login", "/healthz", "/login/extra"):
+    for p in ("/authorize", "/login", "/healthz"):
         assert GATE.allowed(p, {}, "203.0.113.7")
 
 

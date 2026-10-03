@@ -53,3 +53,10 @@ def test_no_category_rule_when_merged_raw_payee_has_learned_one():
     whys = [r["why"] for r in rep["plan"]["create_rules"]]
     assert not any("categorise payee 'Grab'" in w for w in whys)
     assert any("rename matching statement text to payee 'Grab'" in w for w in whys)
+
+
+def test_main_audit_is_the_rules_audit_function():
+    # the MCP audit-trail module must not shadow rules_audit.audit, which /rules/audit* call
+    import main
+    import rules_audit
+    assert main.audit is rules_audit.audit
