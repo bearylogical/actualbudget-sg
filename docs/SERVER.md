@@ -18,6 +18,7 @@ Here is what reaches the internet:
 * **Callbacks:** only Claude's callback (`https://claude.ai/api/mcp/auth_callback`) can register as a client.
 * **Tokens:** access tokens last 1 hour. Refresh tokens last 30 days and rotate on every use. A replayed refresh token revokes the whole grant.
 * **Brute force:** sign-in locks for 15 minutes after 5 wrong passwords.
+* **Source IP:** only Anthropic's range (`160.79.104.0/21`) can reach the MCP and token endpoints. Your browser only gets `/authorize` and `/login`. `mcp-public` checks this itself (`MCP_ALLOWED_CIDRS`), and a Cloudflare WAF rule can add a second check at the edge.
 * **Not exposed:** the backend, bridge, UI and the write-enabled `mcp` stay off the internet.
 
 ## 1. On the VM
@@ -87,13 +88,18 @@ docker compose run --rm --no-deps mcp-public python oauth.py hash   # paste into
 
 1. Go to Cloudflare Zero Trust → Networks → Tunnels → Create tunnel (cloudflared) and name it `budget-mcp`.
 2. Copy the token into `CLOUDFLARE_TUNNEL_TOKEN`.
-3. Add one Public Hostname: `budget-mcp.mangk.uk` → `HTTP` → `budget-mcp-public:8765`. Leave everything else on this tunnel unrouted.
-4. Add the WAF rule below.
+3. Add a route → **Published application** (this used to be called "Public Hostname"): subdomain `budget-mcp`, domain `mangk.uk`, path empty, service `HTTP` → `budget-mcp-public:8765`. Don't add any other routes to this tunnel.
+4. Optional: add the WAF rule below.
 
 This is a separate tunnel from the Home Assistant one, so revoking it can't affect anything else.
 
-**WAF rule** (Security → WAF → Custom rules, action **Block**). Only Anthropic may call the MCP
-and token endpoints. Your browser only needs `/authorize` and `/login`.
+**IP allowlist.** `mcp-public` already refuses everything except `/authorize`, `/login` and
+`/healthz` unless the request comes from Anthropic's `160.79.104.0/21`. It reads the client
+address from Cloudflare's `CF-Connecting-IP` header. This works on the Free plan and needs no
+setup. To change the range, set `MCP_ALLOWED_CIDRS` in `.env` (comma-separated).
+
+**WAF rule (optional, defence in depth).** This blocks the same traffic at Cloudflare's edge, before
+it reaches the tunnel. Go to your domain → Security → Security rules → Custom rules, with action **Block**:
 
 ```
 (http.host eq "budget-mcp.mangk.uk"
@@ -108,11 +114,11 @@ docker compose logs -f mcp-public cloudflared
 ```
 
 **Alternative: Tailscale Funnel.** Use this instead of Cloudflare if you'd rather not involve it.
-The URL becomes `https://<vm>.<tailnet>.ts.net`. Funnel can't do the IP rule above, so the
-password and lockout are the only gate.
+The URL becomes `https://<vm>.<tailnet>.ts.net`. Funnel doesn't send `CF-Connecting-IP`, so turn
+the IP allowlist off (`MCP_ALLOWED_CIDRS=` in `.env`). Then the password and lockout are the only gate.
 
 ```sh
-docker compose --profile connector up -d mcp-public      # skip cloudflared
+MCP_ALLOWED_CIDRS= docker compose --profile connector up -d mcp-public      # skip cloudflared
 sudo tailscale funnel --bg --https=443 http://127.0.0.1:8766
 # MCP_PUBLIC_URL=https://<vm>.<tailnet>.ts.net  (needs the funnel nodeAttr in your tailnet policy)
 ```
@@ -120,8 +126,9 @@ sudo tailscale funnel --bg --https=443 http://127.0.0.1:8766
 **Smoke test from anywhere.**
 
 ```sh
-curl -s https://budget-mcp.mangk.uk/.well-known/oauth-protected-resource/mcp   # JSON, resource …/mcp
-curl -si -X POST https://budget-mcp.mangk.uk/mcp | head -1                       # 401 (or 403 from the WAF)
+curl -s https://budget-mcp.mangk.uk/healthz                                       # ok
+docker compose logs mcp-public | grep "Source-IP gate on"                         # allowlist active
+curl -si -X POST https://budget-mcp.mangk.uk/mcp | head -1                       # 403 (IP allowlist) from your machine
 ```
 
 ## 5. Add it to Claude

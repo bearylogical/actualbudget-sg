@@ -5,20 +5,40 @@
     python server.py --http --port 8799 &
   python test_oauth_flow.py http://127.0.0.1:8799
 
+With the source-IP gate (MCP_ALLOWED_CIDRS=160.79.104.0/21 on the server), add --gate: requests
+then pose as Anthropic via CF-Connecting-IP, and outsiders are checked to get 403.
+
 Ends by tripping the 15-minute lockout, so don’t point it at the real server.
 """
 import base64, hashlib, re, secrets, sys, json
 from urllib.parse import urlparse, parse_qs
 import httpx
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8799"
+args = [a for a in sys.argv[1:] if a != "--gate"]
+GATE = "--gate" in sys.argv
+BASE = args[0] if args else "http://127.0.0.1:8799"
 PW = "correct horse battery"
 CB = "https://claude.ai/api/mcp/auth_callback"
-c = httpx.Client(base_url=BASE, trust_env=False, follow_redirects=False, timeout=20)
+c = httpx.Client(base_url=BASE, trust_env=False, follow_redirects=False, timeout=20,
+                 headers={"CF-Connecting-IP": "160.79.104.10"} if GATE else {})
 ok = lambda cond, msg: print(("PASS " if cond else "FAIL ") + msg) or (cond or sys.exit(1))
 MCP_HDRS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
+
+# 0. source-IP gate: outsiders only reach the browser pages
+if GATE:
+    out = httpx.Client(base_url=BASE, trust_env=False, follow_redirects=False, timeout=20,
+                       headers={"CF-Connecting-IP": "203.0.113.7"})
+    for path in ("/mcp", "/token", "/register", "/.well-known/oauth-authorization-server"):
+        r = out.request("POST" if path in ("/mcp", "/token", "/register") else "GET", path)
+        ok(r.status_code == 403, f"outsider refused on {path} ({r.status_code})")
+    r = out.post("/mcp", json=init, headers={**MCP_HDRS, "CF-Connecting-IP": "::ffff:160.79.104.10"})
+    ok(r.status_code == 401, f"IPv4-mapped Anthropic address let through ({r.status_code})")
+    ok(out.get("/healthz").status_code == 200, "outsider can reach /healthz")
+    ok(out.get("/login?req=x").status_code != 403, "outsider can reach /login")
+    ok(out.get("/authorize").status_code != 403, "outsider can reach /authorize")
+    ok(httpx.get(BASE + "/mcp", trust_env=False).status_code == 403, "no header + non-Anthropic peer refused")
 
 # 1. unauthenticated → 401 with resource_metadata
 r = c.post("/mcp", json=init, headers=MCP_HDRS)
