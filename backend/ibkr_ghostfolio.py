@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import date
 from pathlib import Path
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -115,16 +116,21 @@ def _iso(ts) -> str:
 
 
 def already_imported(activities: list[dict], existing_orders: list[dict]) -> tuple[list, list]:
-    """Split into (new, duplicate) by IBKR trade id in the comment, then by date+symbol+qty."""
+    """Split into (new, duplicate) by IBKR trade id in the comment, then by symbol+qty+type within a day
+    (activities entered by hand in Ghostfolio are stored at local midnight, i.e. the previous UTC day)."""
     seen_ids = {m.group(1) for o in existing_orders
                 for m in [re.search(r"ibkr:(\S+)", str(o.get("comment") or ""))] if m}
-    keys = {(str(o.get("date", ""))[:10], (o.get("SymbolProfile") or {}).get("symbol") or o.get("symbol"),
-             round(float(o.get("quantity") or 0), 6), o.get("type")) for o in existing_orders}
+    days: dict[tuple, list[date]] = {}
+    for o in existing_orders:
+        sym = (o.get("SymbolProfile") or o.get("assetProfile") or {}).get("symbol") or o.get("symbol")
+        key = (sym, round(float(o.get("quantity") or 0), 6), o.get("type"))
+        days.setdefault(key, []).append(date.fromisoformat(str(o.get("date", ""))[:10]))
     new, dup = [], []
     for a in activities:
         tid = re.search(r"ibkr:(\S+)", a["comment"]).group(1)
-        key = (a["date"][:10], a["symbol"], round(a["quantity"], 6), a["type"])
-        (dup if tid in seen_ids or key in keys else new).append(a)
+        d = date.fromisoformat(a["date"][:10])
+        near = any(abs((d - e).days) <= 1 for e in days.get((a["symbol"], round(a["quantity"], 6), a["type"]), []))
+        (dup if tid in seen_ids or near else new).append(a)
     return new, dup
 
 
@@ -135,6 +141,9 @@ def compare_positions(positions: list[dict], holdings: list[dict], overrides: di
     gf = {}
     for h in holdings or []:
         sym = h.get("symbol")
+        prof = h.get("assetProfile") or h.get("SymbolProfile") or {}
+        if prof.get("assetSubClass") == "CASH" or prof.get("assetClass") == "LIQUIDITY":
+            continue                     # the account's cash balance, not a security
         if sym:
             gf[sym] = gf.get(sym, 0.0) + float(h.get("quantity") or 0)
     diffs = []

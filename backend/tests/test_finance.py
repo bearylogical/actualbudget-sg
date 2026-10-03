@@ -64,6 +64,34 @@ def test_ghostfolio_summary_and_auth(monkeypatch):
     assert s["value"] == 100.5 and s["performance_ytd"] == 0.05 and s["holdings"][0]["symbol"] == "VWRA.L"
 
 
+def test_ghostfolio_orders_activities_with_order_fallback(monkeypatch):
+    monkeypatch.setenv("GHOSTFOLIO_URL", "http://gf")
+    monkeypatch.setenv("GHOSTFOLIO_TOKEN", "tok")
+    for legacy in (False, True):
+        ghostfolio._jwt.update(token=None, exp=0)
+
+        def handler(req):
+            p = req.url.path
+            if p == "/api/v1/auth/anonymous":
+                return httpx.Response(200, json={"authToken": "jwt"})
+            if p == ("/api/v1/order" if legacy else "/api/v1/activities"):
+                assert req.url.params["accounts"] == "acc"
+                return httpx.Response(200, json={"activities": [{"comment": "ibkr:t1"}], "count": 1})
+            return httpx.Response(404)
+        assert ghostfolio.orders("acc", httpx.MockTransport(handler)) == [{"comment": "ibkr:t1"}]
+
+def test_ghostfolio_holdings_symbol_from_asset_profile(monkeypatch):
+    monkeypatch.setenv("GHOSTFOLIO_URL", "http://gf")
+    monkeypatch.setenv("GHOSTFOLIO_TOKEN", "tok")
+    ghostfolio._jwt.update(token=None, exp=0)
+
+    def handler(req):
+        if req.url.path == "/api/v1/auth/anonymous":
+            return httpx.Response(200, json={"authToken": "jwt"})
+        return httpx.Response(200, json={"holdings": [{"quantity": 7, "assetProfile": {"symbol": "ASML.AS", "name": "ASML"}}]})
+    h = ghostfolio.holdings("acc", httpx.MockTransport(handler))
+    assert h[0]["symbol"] == "ASML.AS" and h[0]["name"] == "ASML" and h[0]["quantity"] == 7
+
 def test_ghostfolio_not_configured(monkeypatch):
     monkeypatch.delenv("GHOSTFOLIO_URL", raising=False)
     assert ghostfolio.summary() == {"configured": False}

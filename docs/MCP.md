@@ -19,7 +19,7 @@ IBKR itself comes from the **Interactive Brokers connector** in Claude — no se
   "mcpServers": {
     "budget-app": {
       "command": "uv",
-      "args": ["run", "--with", "mcp", "--with", "httpx", "python",
+      "args": ["run", "--with", "mcp>=1.26,<2", "--with", "httpx", "python",
                "/Users/syamil/Projects/budget-app/mcp/server.py"],
       "env": { "BUDGET_APP_URL": "http://127.0.0.1:8000" }
     },
@@ -68,7 +68,7 @@ Because the budget-app runs on your network, the run must happen *on your Mac*:
    ```json
    "budget-app-readonly": {
      "command": "uv",
-     "args": ["run", "--with", "mcp", "--with", "httpx", "python",
+     "args": ["run", "--with", "mcp>=1.26,<2", "--with", "httpx", "python",
               "/Users/syamil/Projects/budget-app/mcp/server.py"],
      "env": { "BUDGET_APP_URL": "http://127.0.0.1:8000", "MCP_READ_ONLY": "true" }
    }

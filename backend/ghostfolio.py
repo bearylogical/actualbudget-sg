@@ -50,6 +50,12 @@ def _get(client: httpx.Client, path: str, params: dict | None = None) -> dict:
     return r.json()
 
 
+def _flat(h: dict) -> dict:
+    """Newer Ghostfolio nests symbol/name under assetProfile (older: SymbolProfile or top level)."""
+    prof = h.get("assetProfile") or h.get("SymbolProfile") or {}
+    return {**h, "symbol": h.get("symbol") or prof.get("symbol"), "name": h.get("name") or prof.get("name")}
+
+
 def _num(*vals):
     for v in vals:
         if isinstance(v, (int, float)):
@@ -83,6 +89,7 @@ def summary(transport: httpx.BaseTransport | None = None) -> dict:
     rows = holdings.get("holdings") or []
     if isinstance(rows, dict):
         rows = list(rows.values())
+    rows = [_flat(h) for h in rows]
     top = sorted(({"name": h.get("name") or h.get("symbol"), "symbol": h.get("symbol"),
                    "value": _num(h.get("valueInBaseCurrency"), h.get("value")),
                    "allocation": _num(h.get("allocationInPercentage")),
@@ -128,8 +135,14 @@ def find_broker_account(name_hint: str = "ibkr", transport=None) -> dict | None:
 
 
 def orders(account_id: str | None = None, transport=None) -> list[dict]:
+    params = {"accounts": account_id} if account_id else None
     with _client(transport) as c:
-        d = _get(c, "v1/order", {"accounts": account_id} if account_id else None)
+        try:
+            d = _get(c, "v1/activities", params)
+        except httpx.HTTPStatusError as e:   # Ghostfolio before the /order → /activities rename
+            if e.response.status_code != 404:
+                raise
+            d = _get(c, "v1/order", params)
     return d.get("activities", d if isinstance(d, list) else [])
 
 
@@ -137,7 +150,7 @@ def holdings(account_id: str | None = None, transport=None) -> list[dict]:
     with _client(transport) as c:
         d = _get(c, "v1/portfolio/holdings", {"accounts": account_id} if account_id else None)
     rows = d.get("holdings", [])
-    return list(rows.values()) if isinstance(rows, dict) else rows
+    return [_flat(h) for h in (rows.values() if isinstance(rows, dict) else rows)]
 
 
 def import_activities(activities: list[dict], dry_run: bool = True, transport=None) -> dict:
