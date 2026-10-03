@@ -17,6 +17,7 @@
   export let result = null;             // bound: last import result
   export let rulesCreated = 0;
   export let scanNote = '';
+  export let uploadId = '';             // import-history record, marked undone on undo
 
   const API = '/api';
   const dispatch = createEventDispatcher();
@@ -63,7 +64,7 @@
     undoing = true; error = '';
     try {
       await readJson(await fetch(`${API}/actual/undo-import`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: result.addedIds }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: result.addedIds, uploadId }),
       }));
       result = null; lastKey = '';
       dispatch('undone');

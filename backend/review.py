@@ -171,6 +171,16 @@ def get(iid: str) -> dict | None:
         return _row(r) if r else None
 
 
+def statuses(ids: list[str]) -> list[dict]:
+    """Brief state of the given items (for the import history)."""
+    if not ids:
+        return []
+    with db() as con:
+        rows = con.execute(f"SELECT id, kind, status, decision FROM items WHERE id IN ({','.join('?' * len(ids))})",
+                           list(ids)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def counts() -> dict:
     with db() as con:
         rows = con.execute("SELECT kind, status, COUNT(*) n FROM items GROUP BY kind, status").fetchall()

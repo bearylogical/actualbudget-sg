@@ -17,6 +17,7 @@
   export let recLoading = false;
   export let locked = false;       // already imported: the account can't change without an undo
   export let blocked = true;       // out: can't continue
+  export let seenBefore = [];      // earlier imports of this exact file (import history)
 
   const dispatch = createEventDispatcher();
   let dragover = false;
@@ -115,6 +116,18 @@
       </label>
     {/if}
   </div>
+
+  {#if seenBefore.length}
+    {@const last = seenBefore[0]}
+    <div class="banner warn" role="status">
+      <span class="b-icon"><Icon name="info" size={20} /></span>
+      <div class="b-body">
+        <div><strong>You've uploaded this exact file before</strong> — {new Date(last.created * 1000).toLocaleString('en-SG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })},
+          {last.status === 'imported' ? `imported ${last.added} into ${last.account_name || 'Actual'}` : last.status === 'nothing_new' ? 'nothing new was imported' : last.status === 'undone' ? 'later undone' : last.status === 'failed' ? 'it failed' : 'not imported'}{seenBefore.length > 1 ? ` (${seenBefore.length} times in all)` : ''}.
+          Rows already in Actual are skipped either way. <a href="/history">History</a></div>
+      </div>
+    </div>
+  {/if}
 
   {#if conflict}
     <div class="banner warn" role="alert">

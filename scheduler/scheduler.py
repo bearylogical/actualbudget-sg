@@ -26,6 +26,7 @@ import history
 import review
 import reconcile
 import bridge_client
+import import_log
 from llm import LLMCategorizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -177,21 +178,24 @@ def resolve_account(info, transactions: list[dict], filename: str,
                      "in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")
 
 
-def post_import_checks(info, transactions: list[dict], account_id: str, account_name: str):
+def post_import_checks(info, transactions: list[dict], account_id: str, account_name: str) -> dict:
     """Queue duplicates / transfers found in Actual, then reconcile against the statement.
     Learned patterns (e.g. card payment → card account) are applied automatically;
-    everything else waits in the review queue."""
+    everything else waits in the review queue. → {review_ids, reconcile, error} for the history."""
+    out = {"review_ids": [], "reconcile": None, "error": None}
     if not transactions:
-        return
+        return out
     dates = sorted(t["date"] for t in transactions)
     try:
         rows, _ = bridge_client.txns(dates[0], dates[-1])
         auto = []
         for d in review.find_existing_duplicates([r for r in rows if r["account"] == account_id]):
-            review.enqueue("existing_duplicate", {**d, "account": account_id}, [d["a"]["id"], d["b"]["id"]])
+            it = review.enqueue("existing_duplicate", {**d, "account": account_id}, [d["a"]["id"], d["b"]["id"]])
+            out["review_ids"].append(it["id"])
         last4 = {v["account_id"]: fp.rsplit("|", 1)[-1] for fp, v in acct.load_map().items()}
         for p in review.find_transfer_pairs(rows, last4):
             it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
+            out["review_ids"].append(it["id"])
             if it["status"] == "auto" and it.get("decision"):
                 auto.append(it)
         for it in auto:
@@ -203,6 +207,7 @@ def post_import_checks(info, transactions: list[dict], account_id: str, account_
         hist, accts = bridge_client.txns(reconcile.EPOCH, info.period_end or dates[-1], [account_id])
         others = [r for r in rows if r["account"] != account_id]
         rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others)
+        queued = []
         if rep["reconciled"]:
             log.info(f"  Reconciled: Actual matches the bank balance")
         else:
@@ -211,10 +216,14 @@ def post_import_checks(info, transactions: list[dict], account_id: str, account_
             queued = reconcile.agent(rep, transactions, llm)["queued"] if use_llm else reconcile.queue(rep)
             gap = rep["gap"]
             log.info(f"  Balance gap {gap/100 if gap is not None else '?'} — {len(queued)} fix(es) queued for review")
+        out["review_ids"] += [q["id"] for q in queued if q.get("id")]
+        out["reconcile"] = import_log.reconcile_summary(rep, queued)
         counts = review.counts()
         STATE.update(review_pending=counts.get("pending", 0))
     except Exception as e:
         log.warning(f"  Post-import checks skipped: {e}")
+        out["error"] = str(e)[:300]
+    return out
 
 
 def import_transactions(account_id: str, transactions: list[dict]) -> dict:
@@ -233,6 +242,16 @@ def import_transactions(account_id: str, transactions: list[dict]) -> dict:
     return r.json()
 
 
+def _hist(fn, hid, *args, **kw):
+    """Write to the import history; a failure there is logged, never fatal."""
+    if not hid:
+        return
+    try:
+        fn(hid, *args, **kw)
+    except Exception as e:
+        log.warning(f"  Import history: {e}")
+
+
 def already_processed(path: Path) -> bool:
     """Check if a same-named file already exists in done/ or error/."""
     return (DONE_DIR / path.name).exists() or (ERROR_DIR / path.name).exists()
@@ -241,13 +260,22 @@ def already_processed(path: Path) -> bool:
 def process_file(path: Path):
     log.info(f"Processing: {path.name}")
     STATE.update(last_file=path.name, last_run=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    stage, hid = "parse", None
     try:
-        transactions, bank, info = parse_statement(path.read_bytes(), path.name)
+        content = path.read_bytes()
+        try:
+            hid = import_log.start("scheduler", path.name, content)
+        except Exception as e:                    # the history must never block an import
+            log.warning(f"  Import history unavailable: {e}")
+        transactions, bank, info = parse_statement(content, path.name)
         log.info(f"  Parsed {len(transactions)} transactions — {info.label}")
+        _hist(import_log.set_statement, hid, info, len(transactions))
 
+        stage = "connect"
         if not ensure_budget_loaded():
             raise RuntimeError("Could not load Actual budget — check connection config")
 
+        stage = "account"
         ctx, raw = fetch_context()
         rows = fetch_matches(transactions)
         account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []), rows)
@@ -265,21 +293,30 @@ def process_file(path: Path):
         log.info(f"  Categorised: actual={s['actual']} seed={s['seed']} llm={s['llm']} "
                  f"transfer={s['transfer']} review={s['review']} unmapped={s['unmapped']}")
 
+        stage = "import"
         result = import_transactions(account_id, enriched["transactions"])
         acct.remember(info.fingerprint, account_id, account_name)
+        _hist(import_log.update, hid, stats=s)
+        _hist(import_log.record_result, hid, result, account_id, account_name, why)
         log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
                  f"{result.get('skipped', 0)} skipped")
         # possible duplicates → review queue (nothing is imported until you approve)
         by_desc = {(t["date"], t["description"], t["amount"]): t for t in enriched["transactions"]}
+        held_ids = []
         for u in result.get("unreviewed") or []:
             row = by_desc.get((u["date"], u["description"], u["amount"]))
             if row:
-                review.enqueue("import_duplicate", {"account": account_id, "account_name": account_name,
-                                                    "incoming": row, "reason": u.get("reason")},
-                               [account_id, row["imported_id"]])
+                it = review.enqueue("import_duplicate", {"account": account_id, "account_name": account_name,
+                                                         "incoming": row, "reason": u.get("reason")},
+                                    [account_id, row["imported_id"]])
+                held_ids.append(it["id"])
             log.warning(f"  Held for review (possible duplicate): {u['date']} {u['description'][:40]} "
                         f"{u['amount']} — {u.get('reason', '')}")
-        post_import_checks(info, enriched["transactions"], account_id, account_name)
+        stage = "checks"
+        checks = post_import_checks(info, enriched["transactions"], account_id, account_name)
+        _hist(import_log.add_review_ids, hid, held_ids + checks["review_ids"])
+        if checks["reconcile"]:
+            _hist(import_log.update, hid, reconcile=checks["reconcile"])
         if result.get("errors"):
             log.warning(f"  Import errors: {result['errors']}")
 
@@ -293,6 +330,7 @@ def process_file(path: Path):
     except Exception as e:
         log.error(f"  Error: {e}")
         STATE.update(last_result="error", last_error=str(e)[:300])
+        _hist(import_log.fail, hid, stage, e)
         dest = ERROR_DIR / path.name
         try:
             shutil.move(str(path), str(dest))

@@ -17,6 +17,10 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     import review
     monkeypatch.setattr(review, "DATA_DIR", tmp_path)
     monkeypatch.setattr(review, "DB_FILE", tmp_path / "review.db")
+    import import_log
+    monkeypatch.setattr(import_log, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(import_log, "DB_FILE", tmp_path / "imports.db")
+    monkeypatch.setattr(import_log, "STATEMENTS_DIR", tmp_path / "statements")
     monkeypatch.setattr(llm, "CACHE_FILE", tmp_path / "llm_cache.json")
     monkeypatch.setenv("LLM_PROVIDER", "none")
     yield

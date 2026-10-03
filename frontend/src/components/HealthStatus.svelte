@@ -97,6 +97,7 @@
   .health { position: relative; }
   .pill { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .label { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text2); }
+  @media (max-width: 600px) { .label { display: none; } }   /* phones: the dot alone; tap for details */
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #6b7280; display: inline-block; }
   .dot.ok { background: var(--accent2); }
   .dot.degraded, .dot.stale { background: var(--warn); }
