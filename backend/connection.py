@@ -69,6 +69,13 @@ def clear() -> dict:
     return cfg
 
 
+def load_body() -> dict | None:
+    """The saved connection as a bridge /budgets/load body, or None if incomplete."""
+    cfg = load()
+    body = {field: cfg[key] for field, key in FIELDS.items() if cfg.get(key)}
+    return body if all(body.get(f) for f in ("serverURL", "password", "budgetId")) else None
+
+
 def status() -> dict:
     """Non-secret view: what's saved, never the passwords."""
     cfg = load()

@@ -72,7 +72,7 @@ The **Scheduler** is a 4th service that watches a directory for `.xls/.xlsx` fil
 
 ## Actual Bridge Notes
 
-- `@actual-app/api` version is **pinned** in `actual-bridge/package.json` — must match the running Actual Budget server version.
+- `@actual-app/api` must match the running Actual Budget server version. The bridge build reads `$ACTUAL_SERVER_URL/info` (from `.env`) and installs the matching version, so `docker compose up --build` after an Actual upgrade is enough; `ACTUAL_API_VERSION` in `.env` overrides it. `scripts/actual-version.sh` compares the two (`--up` rebuilds the bridge).
 - The bridge maintains in-memory state (server URL, password, loaded budget). Restarting the bridge requires re-authenticating from the UI.
 - Unhandled promise rejections are caught globally to prevent crashes from Actual API quirks.
 

@@ -110,7 +110,7 @@ def test_server_version_mismatch():
     _, server = run_bridge({"ok": True, "initialized": True, "budgetLoaded": True, "apiVersion": "26.9.0",
                             "serverURL": "http://actual:5006",
                             "actualServer": {"ok": True, "status": 200, "version": "25.10.0", "versionMatch": False}})
-    assert server["status"] == "degraded" and "pin" in server["detail"]
+    assert server["status"] == "degraded" and "actual-version.sh" in server["detail"]
 
 
 def test_server_unreachable():

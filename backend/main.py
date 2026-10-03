@@ -17,6 +17,7 @@ from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
 import connection
 import import_log
+import bridge_client
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -310,7 +311,7 @@ async def export_csv(data: dict):
 # ── Actual Budget bridge proxy ────────────────────────────────────────────────
 
 
-async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30):
+async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30, _retry: bool = True):
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             if method == "GET":
@@ -328,6 +329,10 @@ async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30):
             detail = r.json().get("error", r.text)
         except ValueError:
             detail = r.text
+        # bridge restarted and lost its in-memory budget → reload the saved connection, retry once
+        if _retry and bridge_client.is_no_budget(r.status_code, detail) \
+                and await run_in_threadpool(bridge_client.reload_saved_budget):
+            return await _bridge(method, path, body, timeout, _retry=False)
         raise HTTPException(r.status_code, detail)
     return r.json()
 
@@ -438,7 +443,6 @@ async def actual_reset():
 # ── Review queue (duplicates / transfers / reconciliation fixes) ─────────────
 import review
 import reconcile
-import bridge_client
 from datetime import date as _date, timedelta as _td
 
 

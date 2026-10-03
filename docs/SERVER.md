@@ -44,8 +44,13 @@ MCP_OWNER_PASSWORD_HASH=scrypt:…
 CLOUDFLARE_TUNNEL_TOKEN=…
 ```
 
-Check `@actual-app/api` in `actual-bridge/package.json` matches your Actual server's version
-(`https://budget.local.mangk.uk/info`) and pin it if it doesn't.
+The bridge's `@actual-app/api` is matched to your Actual server at build time from
+`ACTUAL_SERVER_URL` in `.env`, so after upgrading Actual run `docker compose up -d --build`.
+To check the two versions (and rebuild with `--up`):
+
+```sh
+scripts/actual-version.sh
+```
 
 ## 2. Move your data from the Mac
 
