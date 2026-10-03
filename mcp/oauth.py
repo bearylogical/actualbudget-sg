@@ -14,6 +14,9 @@ person:
   refresh 30 days and rotated on every use. A reused (stolen) refresh token revokes the
   whole grant.
 * Wrong passwords lock sign-in for 15 minutes after 5 tries.
+* Optional source-IP gate (MCP_ALLOWED_CIDRS, e.g. Anthropic's 160.79.104.0/21): everything
+  except the browser pages (/authorize, /login) and /healthz is refused from other addresses.
+  It's the WAF rule from docs/SERVER.md, done in-app for plans/tunnels without one.
 
 CLI:
   python oauth.py hash               # prompt for a password, print MCP_OWNER_PASSWORD_HASH
@@ -27,6 +30,7 @@ import base64
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import secrets
@@ -333,6 +337,46 @@ def install_routes(mcp, provider: OwnerOAuthProvider):
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request):
         return HTMLResponse("ok")
+
+
+# Your browser needs these from anywhere; the probe hits /healthz from inside the container.
+OPEN_PATHS = ("/authorize", "/login", "/healthz")
+
+
+def parse_cidrs(value: str) -> list:
+    return [ipaddress.ip_network(c.strip(), strict=False) for c in value.split(",") if c.strip()]
+
+
+class SourceIPGate:
+    """ASGI wrapper: 403 for requests from outside `cidrs`, except OPEN_PATHS.
+
+    The client address is Cloudflare's CF-Connecting-IP (Cloudflare overwrites it, so it can't
+    be spoofed through the tunnel), else the TCP peer. Only cloudflared and other containers on
+    the compose network can reach this port directly, so the header is trusted from any peer."""
+
+    def __init__(self, app, cidrs: list):
+        self.app, self.cidrs = app, cidrs
+
+    def allowed(self, path: str, headers: dict, peer: str | None) -> bool:
+        if path in OPEN_PATHS or path.startswith(tuple(p + "/" for p in OPEN_PATHS)):
+            return True
+        raw = headers.get(b"cf-connecting-ip", b"").decode().strip() or peer or ""
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            return False
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return any(ip in n for n in self.cidrs)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and not self.allowed(scope.get("path", ""), dict(scope.get("headers") or []),
+                                                        (scope.get("client") or (None,))[0]):
+            await send({"type": "http.response.start", "status": 403,
+                        "headers": [(b"content-type", b"text/plain"), (b"cache-control", b"no-store")]})
+            await send({"type": "http.response.body", "body": b"Forbidden"})
+            return
+        await self.app(scope, receive, send)
 
 
 def _cli():

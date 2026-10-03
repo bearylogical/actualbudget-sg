@@ -260,6 +260,12 @@ if __name__ == "__main__":
                 enable_dns_rebinding_protection=True,
                 allowed_hosts=[urlparse(PUBLIC_URL).netloc, "127.0.0.1:*", "localhost:*", *extra],
                 allowed_origins=["https://claude.ai", "https://claude.com"])
+            # Only Anthropic may reach the MCP/token endpoints (the in-app version of the WAF rule).
+            cidrs = oauth.parse_cidrs(os.getenv("MCP_ALLOWED_CIDRS", ""))
+            if cidrs:
+                _app = mcp.streamable_http_app
+                mcp.streamable_http_app = lambda: oauth.SourceIPGate(_app(), cidrs)
+                print(f"Source-IP gate on: {', '.join(map(str, cidrs))} (+ {', '.join(oauth.OPEN_PATHS)} from anywhere)", flush=True)
         elif a.host not in ("127.0.0.1", "localhost", "::1"):
             mcp.settings.transport_security = TransportSecuritySettings(
                 enable_dns_rebinding_protection=bool(extra), allowed_hosts=extra)

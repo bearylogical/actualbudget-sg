@@ -147,6 +147,9 @@ services:
       MCP_PUBLIC_URL: "${MCP_PUBLIC_URL:-}"
       MCP_OWNER_PASSWORD_HASH: "${MCP_OWNER_PASSWORD_HASH:-}"
       MCP_ALLOWED_HOSTS: "budget-mcp-public:*"
+      # Only Anthropic (claude.ai) may reach /mcp, /token, /register…; your browser still gets
+      # /authorize + /login. The in-app version of the WAF rule. Set it empty for Tailscale Funnel.
+      MCP_ALLOWED_CIDRS: "${MCP_ALLOWED_CIDRS-160.79.104.0/21}"
       DATA_DIR: "/data"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=4).status == 200 else 1)"]
