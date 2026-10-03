@@ -10,10 +10,11 @@ import oauth
 from conftest import MCP_DIR
 
 WRITE_TOOLS = {"review_scan", "category_scan", "review_ask_ai", "review_decide", "reconcile_account",
-               "ibkr_to_ghostfolio_import", "ghostfolio_clear_cash"}
+               "ibkr_to_ghostfolio_import", "ghostfolio_clear_cash",
+               "ghostfolio_update_activity", "ghostfolio_delete_activity"}
 # The exact set a read-only / public server exposes. Adding a tool here is a conscious decision:
 # anything listed is reachable from claude.ai once signed in.
-READ_TOOLS = {"money_summary", "list_accounts", "review_pending", "list_categories", "review_memory",
+READ_TOOLS = {"ghostfolio_list_activities", "money_summary", "list_accounts", "review_pending", "list_categories", "review_memory",
               "ibkr_to_ghostfolio_preview", "weekly_snapshot", "get_transactions", "monthly_trends", "health"}
 
 LIST_TOOLS = "import asyncio, json, server; print(json.dumps(sorted(t.name for t in asyncio.run(server.mcp.list_tools()))))"
