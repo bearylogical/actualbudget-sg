@@ -5,6 +5,9 @@
 # Find your server version at: http://your-server:5006/info
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Pinned so volumes are budget-app_* wherever the repo is cloned (Mac or server).
+name: budget-app
+
 # Optional LLM fallback for merchants no rule recognises (see backend/llm.py).
 # Default is off. For privacy, prefer a local model (Ollama on the homelab).
 x-llm-env: &llm-env
@@ -79,7 +82,9 @@ services:
     container_name: budget-scheduler
     restart: unless-stopped
     volumes:
-      - watch-dir:/watch
+      # On the server, point WATCH_DIR_HOST at a folder you drop statements into
+      # (SMB / Syncthing). Unset → a Docker volume.
+      - ${WATCH_DIR_HOST:-watch-dir}:/watch
       - scheduler-data:/data
     environment:
       <<: *llm-env
@@ -106,23 +111,70 @@ services:
       actual-bridge:
         condition: service_healthy
 
-  # Optional: the budget-app MCP server over HTTP, for Claude clients that can't
-  # launch it locally. `docker compose --profile mcp up -d mcp`. Keep it private
-  # (localhost / Tailscale) — it can approve review items.
+  # Optional: the budget-app MCP server over HTTP for Claude clients on your tailnet.
+  # `docker compose --profile mcp up -d mcp`. No auth and it has write tools, so it must
+  # stay private: localhost by default, or MCP_PRIVATE_BIND=<the VM's tailscale IP>.
   mcp:
     profiles: ["mcp"]
     build: ./mcp
     container_name: budget-mcp
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8765:8765"
+      - "${MCP_PRIVATE_BIND:-127.0.0.1}:8765:8765"
     environment:
       BUDGET_APP_URL: "http://backend:8000"
+      MCP_ALLOWED_HOSTS: "${MCP_PRIVATE_HOSTS:-}"   # e.g. "budget-vm.tailnet.ts.net:*,100.x.y.z:*"
     depends_on:
       backend:
+        condition: service_healthy
+
+  # The claude.ai custom connector: read-only tools only, OAuth sign-in with your owner
+  # password. Reached from the internet only through the tunnel below (or Tailscale Funnel
+  # → 127.0.0.1:8766). See docs/SERVER.md.
+  mcp-public:
+    profiles: ["connector"]
+    build: ./mcp
+    container_name: budget-mcp-public
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8766:8765"     # for `tailscale funnel`; the Cloudflare tunnel uses the network
+    volumes:
+      - mcp-data:/data            # OAuth clients + hashed tokens
+    environment:
+      BUDGET_APP_URL: "http://backend:8000"
+      # Both come from .env (see docs/SERVER.md); the container refuses to start without them.
+      MCP_REQUIRE_PUBLIC: "true"
+      MCP_PUBLIC_URL: "${MCP_PUBLIC_URL:-}"
+      MCP_OWNER_PASSWORD_HASH: "${MCP_OWNER_PASSWORD_HASH:-}"
+      MCP_ALLOWED_HOSTS: "budget-mcp-public:*"
+      DATA_DIR: "/data"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Cloudflare Tunnel for the connector only. In Zero Trust → Networks → Tunnels, create a
+  # tunnel, copy its token into CLOUDFLARE_TUNNEL_TOKEN, and add ONE public hostname:
+  #   budget-mcp.<your domain>  →  http://budget-mcp-public:8765
+  cloudflared:
+    profiles: ["connector"]
+    image: cloudflare/cloudflared:latest
+    container_name: budget-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    depends_on:
+      mcp-public:
         condition: service_healthy
 
 volumes:
   actual-data:
   watch-dir:
   scheduler-data:   # shared app data: scheduler-config.json, category aliases, LLM cache
+  mcp-data:         # connector OAuth state (mcp-public)

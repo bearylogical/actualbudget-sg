@@ -1,7 +1,8 @@
 # KIV — move the stack to the Tailscale server so Claude can reach it
 
-**Status:** parked. Today the budget-app + MCP run where Docker runs, and scheduled
-Claude reports reach them only through the Mac ("Require this computer").
+**Status:** option 2 chosen and built (Oct 2026). Runbook: [SERVER.md](SERVER.md).
+Read-only `mcp-public` behind OAuth, exposed through a dedicated Cloudflare Tunnel
+(Tailscale Funnel as the alternative).
 
 ## Goal
 Run the whole stack on the homelab server (on the tailnet) and let Claude reach the
@@ -22,7 +23,7 @@ budget-app MCP without the Mac being awake.
 - [ ] `docker compose --profile mcp up -d` on the server (backend healthchecks green)
 - [ ] Scheduler + watch folder on the server; statements dropped via SMB/Syncthing
 - [ ] Actual server URL reachable from the bridge container (tailnet DNS / MagicDNS)
-- [ ] MCP auth decided (option 2/3) — never expose write tools publicly
+- [x] MCP auth decided: option 2, single-owner OAuth (DCR + PKCE), public mode is read-only by construction
 - [ ] Update the "Weekly Money & Portfolio Report" scheduled task: drop "Require this
       computer" once the connector is attached to it
-- [ ] Update docs/MCP.md
+- [x] Update docs/MCP.md
