@@ -9,7 +9,7 @@ Use when the user asks to update/sync IBKR into Ghostfolio, to check that Ghostf
 
 ## Requirements
 - Interactive Brokers connector (tools `get_account_trades`, `get_account_positions`).
-- budget-app MCP server (tools `ibkr_to_ghostfolio_preview`, `ibkr_to_ghostfolio_import`, `ghostfolio_clear_cash`). If the tools aren't available, see **Troubleshooting** below; don't try to write to Ghostfolio another way.
+- budget-app MCP server (tools `ibkr_to_ghostfolio_preview`, `ibkr_to_ghostfolio_import`, `ghostfolio_clear_cash`, `ghostfolio_list_activities`, `ghostfolio_update_activity`, `ghostfolio_delete_activity`). If the tools aren't available, see **Troubleshooting** below; don't try to write to Ghostfolio another way.
 
 ## Steps
 1. Read IBKR (read-only):
@@ -35,6 +35,11 @@ Ghostfolio tracks securities only; cash (bank and IBKR) lives in Actual, so cash
 - The account's cash balance in Ghostfolio (USD/EUR "holding") is ignored when comparing positions.
 - Hand-entered activities must sit in the IBKR account to be matched (the check runs per account).
 
+## Fixing existing activities
+- `ghostfolio_list_activities` (filter by `account_id` / `symbol`) shows ids, fees and comments. Use it to check that hand-entered trades carry the IBKR commission: compare each activity's `fee` with the matching IBKR trade's `commission`.
+- `ghostfolio_update_activity(activity_id, changes_json)` edits fee, quantity, unitPrice, date, type, currency, comment or accountId. Call it first without `apply` to show before/after, then with `apply=true` after the user's yes. The symbol can't be edited; delete and re-import instead.
+- `ghostfolio_delete_activity(activity_id)` is for real duplicates only (e.g. a hand-entered trade that the sync also imported). Dry run first, then `apply=true` after the user explicitly approves that specific delete.
+
 ## Troubleshooting
 Work down this list; stop at the first thing that's wrong.
 1. **Preview/import tools missing**: the budget-app MCP server isn't registered or crashed on start.
@@ -45,9 +50,11 @@ Work down this list; stop at the first thing that's wrong.
 3. **Preview error `Ghostfolio unreachable: 404 … /api/v1/order`**: the backend predates the Ghostfolio `/order` → `/activities` rename. Rebuild it: `docker compose up -d --build backend`.
 4. **Every IBKR holding shows `ghostfolio: 0` although Ghostfolio has them**: the backend predates the change that reads holding symbols from `assetProfile`. Rebuild the backend as in 3.
 5. **Lots of "new" activities that are already in Ghostfolio**: check the dates and quantities of the Ghostfolio entries against IBKR (see "How already imported works"). Never import until that's explained.
+6. **Import/clear cash fails with `property isExcluded should not exist`**: the backend predates the fix for newer Ghostfolio's account API. Rebuild the backend as in 3, then run `ghostfolio_clear_cash` (dry run, then `apply=true`).
+7. **`ghostfolio_list_activities` / update / delete tools missing**: the MCP server predates them. Restart the MCP server (Claude Desktop: restart the app) after pulling, and rebuild the backend as in 3.
 
 ## Rules
-- Never import or clear cash without the user's yes. Never delete in Ghostfolio.
+- Never import, clear cash, edit or delete without the user's yes to that specific change. Always dry-run edits and deletes first. Never delete in bulk.
 - Re-running is safe: activities carry `ibkr:<trade id>` and are skipped when already present.
 - Cash dividends aren't in the trade feed; mention that if the user asks about dividends. Dividend reinvestments (DRIP) come through as small BUYs.
 - This is record-keeping, not investment advice.
