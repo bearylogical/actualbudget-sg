@@ -13,3 +13,6 @@ watch/
 
 # data exports (contain the saved Actual password)
 *.tgz
+
+# packaged skills (upload to claude.ai)
+skills/*.zip
