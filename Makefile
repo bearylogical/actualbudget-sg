@@ -14,7 +14,6 @@
 .PHONY: up bridge check build build-bridge start start-bridge load health down
 
 COMPOSE ?= docker compose
-BACKEND ?= http://localhost:8000
 
 up: check build start load health
 
@@ -35,14 +34,17 @@ start:
 start-bridge:
 	$(COMPOSE) up -d --wait actual-bridge
 
-# A fresh bridge has no budget; any budget call makes the backend reload the saved one
+# Both run inside the backend container, so they work whatever BACKEND_PORT maps to.
+# A fresh bridge has no budget; any budget call makes the backend reload the saved one.
 load:
-	@curl -fsS -m 90 -o /dev/null $(BACKEND)/actual/accounts \
+	@$(COMPOSE) exec -T backend python -c 'import urllib.request as u; \
+		u.urlopen("http://127.0.0.1:8000/actual/accounts", timeout=90)' 2>/dev/null \
 		&& echo "Budget loaded" \
-		|| echo "Budget not loaded — load it once in the web UI (http://localhost:3000)"
+		|| echo "Budget not loaded — load it once in the web UI"
 
 health:
-	@curl -fsS -m 30 $(BACKEND)/health | python3 -c 'import json,sys; d=json.load(sys.stdin); \
+	@$(COMPOSE) exec -T backend python -c 'import json, urllib.request as u; \
+		d = json.load(u.urlopen("http://127.0.0.1:8000/health", timeout=30)); \
 		print("overall:", d["status"]); \
 		[print(" ", k.ljust(14), v.get("status"), "", v.get("detail", "")) for k, v in d["components"].items()]'
 
