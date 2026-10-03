@@ -7,7 +7,10 @@ of the app still applies: deletions and balance fixes only happen through
 `review_decide`, which Claude should call only after you've said yes.
 
 Run (stdio, for Claude Desktop):   BUDGET_APP_URL=http://127.0.0.1:8000 python server.py
-Run (HTTP, e.g. on the homelab):   python server.py --http --port 8765   (put it behind Tailscale/auth)
+Run (HTTP, e.g. on the homelab):   python server.py --http --port 8765   (tailnet only, no auth)
+Run (public, claude.ai connector): MCP_PUBLIC_URL=https://budget-mcp.example.com \
+                                   MCP_OWNER_PASSWORD_HASH=... python server.py --http
+    Public mode is always read-only and requires OAuth sign-in (see oauth.py).
 """
 from __future__ import annotations
 
@@ -21,7 +24,40 @@ from mcp.server.fastmcp import FastMCP
 API = os.getenv("BUDGET_APP_URL", "http://127.0.0.1:8000").rstrip("/")
 # MCP_READ_ONLY=true: only reading tools are exposed (use this for scheduled reports)
 READ_ONLY = os.getenv("MCP_READ_ONLY", "false").lower() == "true"
-mcp = FastMCP("budget-app")
+
+# Public mode (claude.ai custom connector): OAuth required, write tools never registered.
+PUBLIC_URL = os.getenv("MCP_PUBLIC_URL", "").rstrip("/")
+if os.getenv("MCP_REQUIRE_PUBLIC", "false").lower() == "true" and not PUBLIC_URL.startswith("https://"):
+    # the internet-facing container must never fall back to the private, write-enabled, no-auth mode
+    raise SystemExit("MCP_REQUIRE_PUBLIC is set: MCP_PUBLIC_URL must be the connector's https:// URL.")
+_kwargs: dict = {}
+if PUBLIC_URL:
+    from pathlib import Path
+
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+
+    import oauth
+
+    _pw = os.getenv("MCP_OWNER_PASSWORD_HASH", "")
+    if not _pw.startswith("scrypt:"):
+        raise SystemExit("MCP_PUBLIC_URL is set but MCP_OWNER_PASSWORD_HASH isn't — "
+                         "make one with `python oauth.py hash`. Refusing to start a public server without sign-in.")
+    READ_ONLY = True
+    _provider = oauth.OwnerOAuthProvider(PUBLIC_URL, _pw, Path(os.getenv("DATA_DIR", "/data")),
+                                         allow_loopback=os.getenv("MCP_ALLOW_LOOPBACK", "false").lower() == "true")
+    _kwargs = dict(
+        auth_server_provider=_provider,
+        auth=AuthSettings(
+            issuer_url=PUBLIC_URL, resource_server_url=f"{PUBLIC_URL}/mcp", validate_token_resource=True,
+            required_scopes=[oauth.SCOPE],
+            client_registration_options=ClientRegistrationOptions(enabled=True, valid_scopes=[oauth.SCOPE],
+                                                                  default_scopes=[oauth.SCOPE]),
+            revocation_options=RevocationOptions(enabled=True)),
+    )
+
+mcp = FastMCP("budget-app", **_kwargs)
+if PUBLIC_URL:
+    oauth.install_routes(mcp, _provider)
 
 
 def write_tool():
@@ -210,7 +246,23 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8765)
     a = ap.parse_args()
     if a.http:
+        from urllib.parse import urlparse
+
+        from mcp.server.transport_security import TransportSecuritySettings
+
         mcp.settings.host, mcp.settings.port = a.host, a.port
+        # FastMCP only sets Host/Origin checks for a localhost bind at construction time;
+        # set them for the real bind. Public: only the public hostname (+ in-container probes).
+        # Tailnet/private: MCP_ALLOWED_HOSTS (comma list, "host:*" for any port), else no check.
+        extra = [h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+        if PUBLIC_URL:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=[urlparse(PUBLIC_URL).netloc, "127.0.0.1:*", "localhost:*", *extra],
+                allowed_origins=["https://claude.ai", "https://claude.com"])
+        elif a.host not in ("127.0.0.1", "localhost", "::1"):
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=bool(extra), allowed_hosts=extra)
         mcp.run(transport="streamable-http")
     else:
         mcp.run()

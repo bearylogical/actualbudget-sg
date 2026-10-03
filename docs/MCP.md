@@ -49,6 +49,13 @@ IBKR itself comes from the **Interactive Brokers connector** in Claude — no se
 * Local MCP servers configured in Claude Desktop are also reachable from Cowork sessions
   linked to this Mac.
 
+## claude.ai connector (no Mac needed)
+
+On the homelab VM, the `mcp-public` service is a read-only budget-app MCP behind OAuth, added
+to claude.ai as a custom connector. It works from claude.ai, mobile and cloud scheduled tasks.
+Setup and operations are in [SERVER.md](SERVER.md). Once it's attached to the weekly report,
+the Mac section below no longer applies.
+
 ## Weekly report (scheduled task)
 
 The **Weekly Money & Portfolio Report** scheduled task (Mondays 9:00 SGT) calls
