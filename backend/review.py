@@ -8,8 +8,9 @@ Item kinds and the decisions they accept:
                       is already in the account under another id
                         skip   → it IS the same transaction, don't import
                         import → it's a different transaction, import it
-  existing_duplicate  two rows already in Actual that look like the same transaction
-                        delete_a / delete_b → delete that copy
+  existing_duplicate  two rows already in Actual that look like the same transaction —
+                      in one account, or the same bank row in two accounts (cross_account)
+                        delete_a / delete_b → delete that copy (payload.suggest says which)
                         keep_both
   transfer_pair       money out of one account and into another (card bill payment,
                       own-account transfer) imported as two unrelated rows
@@ -111,6 +112,10 @@ def pattern_for(kind: str, payload: dict) -> tuple[str, str]:
         return (f"reconcile|{payload.get('account')}|{payload.get('fix_type', '')}",
                 f"{payload.get('fix_type', 'fix')} on {payload.get('account_name', 'account')}")
     a = payload["a"]
+    if payload.get("cross_account"):
+        b = payload["b"]
+        return (f"crossdup|{a['account']}|{b['account']}|{_norm(a.get('payee'))}",
+                f"“{a.get('payee')}” in both {a.get('account_name')} and {b.get('account_name')}")
     return (f"existingdup|{a['account']}|{_norm(a.get('payee'))}",
             f"same-day repeats at “{a.get('payee')}”")
 
@@ -355,11 +360,51 @@ def find_transfer_pairs(txns: list[dict], account_last4: dict[str, str] | None =
     return out
 
 
+# words that say nothing about WHO was paid — ignored when comparing bank texts
+_NOISE = {"sgp", "sg", "singapore", "ref", "no", "pte", "ltd", "the", "and", "com", "www", "sgd",
+          "nets", "visa", "mastercard", "debit", "credit", "purchase", "payment", "trf", "fast"}
+
+
+def _tokens(t: dict) -> set[str]:
+    text = f"{t.get('payee') or ''} {t.get('imported_payee') or ''}"
+    return {w for w in _norm(text).split() if len(w) >= 3 and not w.isdigit() and w not in _NOISE}
+
+
+def _similar_text(a: dict, b: dict) -> bool:
+    """Same merchant described differently (xls vs PDF export, payee renamed by a rule)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return False
+    shared = ta & tb
+    return bool(shared) and (len(shared) / len(ta | tb) >= 0.5 or ta <= tb or tb <= ta)
+
+
+def _id_kind(t: dict) -> str:
+    iid = str(t.get("imported_id") or "")
+    return "manual" if not iid else ("ref" if iid.startswith("ref-") else "hash")
+
+
+def drop_choice(a: dict, b: dict) -> str:
+    """Which copy of a duplicate to delete: keep the one carrying a bank reference,
+    then any imported copy over a hand-typed one, else the later/second copy."""
+    ka, kb = _id_kind(a), _id_kind(b)
+    rank = {"ref": 2, "hash": 1, "manual": 0}
+    if rank[ka] != rank[kb]:
+        return "delete_a" if rank[ka] < rank[kb] else "delete_b"
+    return "delete_b"
+
+
 def find_existing_duplicates(txns: list[dict], max_days: int = 2) -> list[dict]:
     """
     Rows inside ONE account that look like the same transaction twice:
-    same amount, within max_days, and (same payee or same bank text) — but with
-    different imported ids (a true re-import of the same id can't happen).
+    same amount, within max_days, different imported ids, and one of
+      * same payee or same bank text                       (confidence high)
+      * one hand-typed, one imported, same day               (high)
+      * similar bank text — same merchant words              (medium)
+      * same day, imported under two id schemes (bank ref vs
+        content hash: the same statement as xls and as PDF)  (medium)
+    Two different bank references are always two different transactions.
+    Each payload carries `suggest` (which copy to delete) and `confidence`.
     """
     by_acct: dict[str, list[dict]] = {}
     for t in txns:
@@ -371,23 +416,75 @@ def find_existing_duplicates(txns: list[dict], max_days: int = 2) -> list[dict]:
         rows.sort(key=lambda t: t["date"])
         for i, a in enumerate(rows):
             for b in rows[i + 1:]:
-                if _days(a["date"], b["date"]) > max_days:
+                gap = _days(a["date"], b["date"])
+                if gap > max_days:
                     break
                 if a["amount"] != b["amount"]:
                     continue
                 if a.get("imported_id") and a.get("imported_id") == b.get("imported_id"):
                     continue
+                ka, kb = _id_kind(a), _id_kind(b)
                 # two different bank references = two different transactions, however similar
-                if str(a.get("imported_id") or "").startswith("ref-") and str(b.get("imported_id") or "").startswith("ref-"):
+                if ka == kb == "ref":
                     continue
                 same_payee = _norm(a.get("payee")) and _norm(a.get("payee")) == _norm(b.get("payee"))
                 same_text = _norm(a.get("imported_payee")) and _norm(a.get("imported_payee")) == _norm(b.get("imported_payee"))
-                if not (same_payee or same_text):
+                one_manual = (ka == "manual") != (kb == "manual")
+                if same_payee or same_text:
+                    conf = "high"
+                    reason = ("one was typed in by hand, one imported" if one_manual else
+                              "same amount and payee within %d day(s), different import ids" % gap)
+                elif one_manual and gap == 0:
+                    conf, reason = "high", "same day and amount — one typed in by hand, one imported"
+                elif _similar_text(a, b):
+                    conf, reason = "medium", "same amount within %d day(s), bank texts name the same merchant" % gap
+                elif gap == 0 and {ka, kb} == {"ref", "hash"}:
+                    conf, reason = "medium", ("same day and amount, imported under two id schemes "
+                                              "(bank reference vs content hash — e.g. the xls and the PDF)")
+                else:
                     continue
-                one_manual = bool(a.get("imported_id")) != bool(b.get("imported_id"))
-                out.append({"a": _slim(a), "b": _slim(b),
-                            "reason": ("one was typed in by hand, one imported" if one_manual else
-                                       "same amount and payee within %d day(s), different import ids" % _days(a["date"], b["date"]))})
+                out.append({"a": _slim(a), "b": _slim(b), "reason": reason, "confidence": conf,
+                            "suggest": drop_choice(a, b)})
+    return out
+
+
+def find_cross_account_duplicates(txns: list[dict], max_days: int = 1) -> list[dict]:
+    """
+    The same statement row imported into TWO accounts (wrong account picked once):
+    same signed amount, within max_days, and the same import id or the same long bank text.
+    Not a transfer — a transfer is equal and OPPOSITE. No `suggest`: only you know which
+    account it belongs to.
+    """
+    cands = [t for t in txns if not t.get("transfer_id") and not t.get("payee_transfer_acct")
+             and not t.get("is_child") and not t.get("starting_balance_flag") and t.get("amount")]
+    by_amount: dict[int, list[dict]] = {}
+    for t in cands:
+        by_amount.setdefault(t["amount"], []).append(t)
+    out, used = [], set()
+    for rows in by_amount.values():
+        if len(rows) < 2:
+            continue
+        rows.sort(key=lambda t: t["date"])
+        for i, a in enumerate(rows):
+            if a["id"] in used:
+                continue
+            for b in rows[i + 1:]:
+                if _days(a["date"], b["date"]) > max_days:
+                    break
+                if b["id"] in used or b["account"] == a["account"]:
+                    continue
+                same_id = a.get("imported_id") and a.get("imported_id") == b.get("imported_id")
+                text = _norm(a.get("imported_payee"))
+                same_text = len(text) >= 12 and text == _norm(b.get("imported_payee"))
+                if not (same_id or same_text):
+                    continue
+                used.update({a["id"], b["id"]})
+                out.append({"a": _slim(a), "b": _slim(b), "cross_account": True,
+                            "confidence": "high" if same_id else "medium",
+                            "reason": (f"the same bank row is in both {a.get('account_name')} and {b.get('account_name')}"
+                                       if same_id else
+                                       f"identical bank text and amount in {a.get('account_name')} and {b.get('account_name')}")})
+                break
     return out
 
 
@@ -437,14 +534,7 @@ def suggested_decision(item: dict) -> str | None:
         if v == "not_duplicate":
             return "keep_both"
         if v == "duplicate":
-            # delete the hand-typed or newer copy, keep the one with a bank reference
-            a, b = item["payload"]["a"], item["payload"]["b"]
-            ref = lambda t: str(t.get("imported_id") or "").startswith("ref-")
-            if ref(a) and not ref(b):
-                return "delete_b"
-            if ref(b) and not ref(a):
-                return "delete_a"
-            if not a.get("imported_id"):
-                return "delete_a"
-            return "delete_b"
+            if item["payload"].get("cross_account"):
+                return None     # which account is right is yours to say
+            return item["payload"].get("suggest") or drop_choice(item["payload"]["a"], item["payload"]["b"])
     return None

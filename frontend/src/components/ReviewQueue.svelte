@@ -33,7 +33,7 @@
   };
   const ACTIONS = {
     import_duplicate: [['skip', 'Same transaction — skip'], ['import', 'Different — import it']],
-    existing_duplicate: [['delete_a', 'Delete first'], ['delete_b', 'Delete second'], ['keep_both', 'Keep both']],
+    existing_duplicate: [['delete_a', 'Delete A'], ['delete_b', 'Delete B'], ['keep_both', 'Keep both']],
     transfer_pair: [['link', 'Link as transfer'], ['keep_separate', 'Keep separate']],
     reconcile_fix: [['apply', 'Apply fix'], ['reject', 'Reject']],
     recategorize: [['apply', 'Apply'], ['keep', 'Keep current']],
@@ -43,8 +43,19 @@
     transfer_pair: { transfer: 'link', not_transfer: 'keep_separate' },
     existing_duplicate: { not_duplicate: 'keep_both' },
   };
-  // which button to highlight: the AI verdict, or for category fixes always "apply"
-  const suggested = it => it.kind === 'recategorize' ? 'apply' : VERDICT_TO[it.kind]?.[it.llm?.verdict];
+  // which button to highlight: the AI verdict; for duplicates without one, the copy the rules say to drop
+  // (keep the bank reference); for category fixes always "apply"
+  function suggested(it) {
+    if (it.kind === 'recategorize') return 'apply';
+    if (it.kind === 'existing_duplicate') {
+      if (it.llm?.verdict === 'not_duplicate') return 'keep_both';
+      return it.payload.cross_account ? null : it.payload.suggest;   // only you know which account is right
+    }
+    return VERDICT_TO[it.kind]?.[it.llm?.verdict];
+  }
+  const kindLabel = it => it.kind === 'existing_duplicate' && it.payload.cross_account ? 'Same row in two accounts' : KIND[it.kind];
+  // where a row came from — the strongest clue for which copy of a duplicate to keep
+  const src = t => !t.imported_id ? 'typed in' : String(t.imported_id).startsWith('ref-') ? 'bank ref' : 'file import';
 
   function money(c) { return (c / 100).toLocaleString('en-SG', { style: 'currency', currency: 'SGD' }); }
 
@@ -95,7 +106,9 @@
     loading = true; note = ''; error = '';
     try {
       const r = await post('/review/scan', { days: 120 });
-      note = `Scan: ${r.queued} new item(s)` + (r.auto_applied ? `, ${r.auto_applied} resolved from what you taught it` : '');
+      note = `Scan: ${r.duplicates ?? 0} possible duplicate(s), ${r.transfers ?? 0} unlinked transfer(s)` +
+        (r.auto_applied ? `, ${r.auto_applied} resolved from what you taught it` : '');
+      if (r.duplicates && !r.transfers) kindFilter = 'existing_duplicate';
       dispatch('changed');
     } catch (e) { error = e.message; }
     await load();
@@ -167,7 +180,9 @@
       return [{ tag: 'Incoming', date: t.date, amount: (t.is_credit ? 1 : -1) * Math.round(t.amount * 100), payee: t.payee, text: t.description, acct: p.account_name }];
     }
     if (it.kind === 'recategorize') { const t = p.txn; return [{ tag: 'Txn', ...t, text: t.imported_payee, acct: t.account_name }]; }
-    if (p.a && p.b) return [{ tag: 'A', ...p.a, text: p.a.imported_payee, acct: p.a.account_name }, { tag: 'B', ...p.b, text: p.b.imported_payee, acct: p.b.account_name }];
+    const dup = it.kind === 'existing_duplicate';
+    if (p.a && p.b) return [{ tag: 'A', ...p.a, text: p.a.imported_payee, acct: p.a.account_name, src: dup ? src(p.a) : '' },
+                            { tag: 'B', ...p.b, text: p.b.imported_payee, acct: p.b.account_name, src: dup ? src(p.b) : '' }];
     return [];
   }
   $: aiCount = items.filter(i => i.llm || i.kind === 'recategorize').length;
@@ -190,7 +205,8 @@
 
     {#if tab === 'pending'}
       <div class="bar">
-        <button class="ghost small" on:click={scan} disabled={loading}>🔎 Scan Actual (120 days)</button>
+        <button class="ghost small" on:click={scan} disabled={loading}
+          title="Look for the same transaction twice (in one account or across two) and for unlinked transfers">🔎 Check duplicates &amp; transfers (120 days)</button>
         <button class="ghost small" on:click={scanCategories} disabled={loading}>🏷 Fix categories (120 days)</button>
         <button class="ghost small" on:click={refreshSuggestions} disabled={loading || !items.some(i => i.kind === 'recategorize')}
           title="Re-check waiting category fixes against your latest rules, mappings and history">↻ Refresh suggestions</button>
@@ -231,7 +247,8 @@
         {#each shown as it (it.id)}
           <div class="item" class:done={it.status !== 'pending'}>
             <div class="item-head">
-              <span class="kind">{KIND[it.kind]}</span>
+              <span class="kind">{kindLabel(it)}</span>
+              {#if it.payload.confidence}<span class="conf {it.payload.confidence}">{it.payload.confidence} match</span>{/if}
               {#if it.kind === 'reconcile_fix'}<strong>{it.payload.title}</strong>{/if}
               <span class="muted">{it.payload.reason || it.payload.why || ''}</span>
               {#if it.status !== 'pending'}<span class="st">{it.status}{it.decision ? ` · ${it.decision}` : ''}{it.decided_by ? ` · ${it.decided_by}` : ''}</span>{/if}
@@ -241,7 +258,7 @@
                 <span class="tag">{r.tag}</span><span>{r.date}</span>
                 <span class="amt" class:pos={r.amount > 0}>{money(r.amount)}</span>
                 <span class="payee">{r.payee ?? '—'}</span><span class="muted acct">{r.acct ?? ''}</span>
-                <span class="muted text">{r.text ?? ''}</span>
+                <span class="muted text">{#if r.src}<span class="src">{r.src}</span>{/if}{r.text ?? ''}</span>
               </div>
             {/each}
             {#if it.kind === 'reconcile_fix'}
@@ -310,6 +327,9 @@
   .amt.pos { color: var(--accent2); }
   .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   .ai { font-size: 12px; color: var(--text2); }
+  .conf { font-size: 11px; border-radius: 999px; padding: 1px 8px; background: var(--surface); color: var(--text2); }
+  .conf.high { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+  .src { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-right: 6px; }
   .recat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .ai-badge { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); border-radius: 999px; padding: 1px 8px; font-size: 11px; margin-right: 6px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }

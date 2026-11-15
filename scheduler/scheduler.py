@@ -206,7 +206,8 @@ def post_import_checks(info, transactions: list[dict], account_id: str, account_
 
         hist, accts = bridge_client.txns(reconcile.EPOCH, info.period_end or dates[-1], [account_id])
         others = [r for r in rows if r["account"] != account_id]
-        rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others)
+        rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others,
+                                cycle_day=reconcile.cycle_day(account_id))
         queued = []
         if rep["reconciled"]:
             log.info("  Reconciled: Actual matches the bank balance")

@@ -190,11 +190,18 @@ approve it in **🧾 Review**:
 | Item | Found by | Your options |
 |---|---|---|
 | Possible duplicate at import | import (UI dry-run / scheduler) | skip · import |
-| Duplicate already in Actual | **Scan Actual** / after each import | delete one · keep both |
+| Duplicate already in Actual | **Check duplicates & transfers** / after each import | delete one · keep both |
 | Unlinked transfer (card payment, own-account transfer) | scan — matched by the other account's number in the bank text | link as transfer · keep separate |
 | Reconciliation fix | **⚖ Reconcile** / scheduler after import | apply · reject |
 | Category fix | **🏷 Fix categories** in Review / `category_scan` (MCP) | apply (or pick another) · keep |
 
+* **Duplicate check** (same amount, within 2 days, different import ids) flags, with a
+  high/medium confidence: same payee or bank text; a hand-typed row next to an imported one;
+  the same merchant described differently (xls vs PDF text); the same day under two id
+  schemes (bank ref vs content hash); and the **same bank row in two accounts** (imported
+  into the wrong account once). Two different bank references are never flagged. The
+  button to delete the copy *without* the bank reference is highlighted even before you
+  ask the AI; for the two-account case you pick.
 * **Ask AI** gives each item a verdict + reason using your configured LLM; **Accept suggestions ≥80%**
   applies confident ones in bulk (deletions always need a click).
 * **🏷 Fix categories** runs the import pipeline (your Actual rules → merchant rules → LLM)
@@ -212,8 +219,21 @@ running balance first diverges (UOB account exports), an exact subset solver, an
 Actual has no history before the statement — the opening balance. With an LLM configured
 an agent investigates using tools (`get_summary`, `list_missing`, `list_extra`,
 `list_duplicates`, `running_balance`, `transfer_candidates`, `solve_gap`, `propose_fix`)
-and explains in plain words; its proposals land in the review queue. Card exports only
-carry the *last statement's* balance, so enter today's owed amount for an exact card check.
+and explains in plain words; its proposals land in the review queue.
+
+**Credit cards.** A card export's *Statement Balance* is what you owed on the last
+statement date (the monthly cut-off), counted by **posting** date — not the balance on the
+export date. Reconcile therefore:
+
+1. finds the statement date — the one you enter (from the e-statement; remembered per card
+   in `DATA_DIR/card_cycles.json`, since cycles keep a fixed day of month), else infers it
+   as the day Actual's balance, with each matched row on its posting date, equals the
+   statement balance;
+2. rolls forward: owed today = statement balance + every row the export posted after that
+   date (payments included);
+3. compares that with Actual today to the cent, so missing / extra / duplicate rows get the
+   same fixes as a bank account. If neither works, it says how far off the closest day is
+   and asks for the statement date (or today's owed amount).
 
 Verified end-to-end against a real Actual server with your UOB card, UOB One Account and
 POSB exports: 3 transfers linked, UOB One Account and POSB reconciled to the cent,

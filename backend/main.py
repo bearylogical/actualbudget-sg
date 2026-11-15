@@ -477,7 +477,11 @@ def scan_and_queue(start: str, end: str, account_ids: list[str] | None = None) -
     else:
         dup_rows = rows
     queued, auto = [], []
-    for d in review.find_existing_duplicates(dup_rows):
+    dups = review.find_existing_duplicates(dup_rows)
+    for d in review.find_cross_account_duplicates(rows):
+        if not account_ids or {d["a"]["account"], d["b"]["account"]} & set(account_ids):
+            dups.append(d)
+    for d in dups:
         it = review.enqueue("existing_duplicate", {**d, "account": d["a"]["account"]}, [d["a"]["id"], d["b"]["id"]])
         (auto if it["status"] == "auto" else queued).append(it)
     for p in review.find_transfer_pairs(rows, _account_last4()):
@@ -486,7 +490,10 @@ def scan_and_queue(start: str, end: str, account_ids: list[str] | None = None) -
         it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
         (auto if it["status"] == "auto" else queued).append(it)
     applied = [_apply(it) for it in auto if it.get("decision")]
-    return {"queued": len([q for q in queued if q["status"] == "pending"]), "auto_applied": len(applied),
+    pending = [q for q in queued if q["status"] == "pending"]
+    return {"queued": len(pending), "auto_applied": len(applied),
+            "duplicates": sum(q["kind"] == "existing_duplicate" for q in pending),
+            "transfers": sum(q["kind"] == "transfer_pair" for q in pending),
             "items": queued + applied}
 
 
@@ -727,14 +734,17 @@ async def review_forget(body: dict):
 # ── Reconciliation ───────────────────────────────────────────────────────────
 
 def run_reconcile(account_id: str, info, statement_rows: list[dict], balance: float | None = None,
-                  as_of: str | None = None, use_llm: bool = True) -> dict:
+                  as_of: str | None = None, use_llm: bool = True, statement_date: str | None = None) -> dict:
     as_of = as_of or info.period_end or max((t["date"] for t in statement_rows), default=_date.today().isoformat())
     start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
     rows, accts = bridge_client.txns(reconcile.EPOCH, as_of, [account_id])
     others, _ = bridge_client.txns(start, as_of)
     others = [t for t in others if t["account"] != account_id]
     name = next((a["name"] for a in accts if a["id"] == account_id), account_id)
-    report = reconcile.analyse(account_id, info, statement_rows, rows, balance, as_of, name, others)
+    if statement_date:      # cards keep a fixed statement day — remember it for next time
+        reconcile.remember_cycle_day(account_id, statement_date)
+    report = reconcile.analyse(account_id, info, statement_rows, rows, balance, as_of, name, others,
+                               statement_date=statement_date, cycle_day=reconcile.cycle_day(account_id))
     llm = LLMCategorizer()
     if use_llm and llm.enabled and not report["reconciled"]:
         try:
@@ -748,13 +758,20 @@ def run_reconcile(account_id: str, info, statement_rows: list[dict], balance: fl
 
 @app.post("/reconcile")
 async def reconcile_account(body: dict):
-    """{account_id, statement?, transactions?, balance?, as_of?, use_llm?} → report + queued fixes."""
+    """{account_id, statement?, transactions?, balance?, as_of?, use_llm?, statement_date?} → report + queued fixes.
+    statement_date: a card's statement (cycle) date, printed on the monthly e-statement — remembered per account."""
     if not body.get("account_id"):
         raise HTTPException(400, "account_id required")
+    if body.get("statement_date"):
+        try:
+            _date.fromisoformat(body["statement_date"])
+        except ValueError:
+            raise HTTPException(400, "statement_date must be YYYY-MM-DD")
     info = acct.StatementInfo.from_dict(body.get("statement"))
     try:
         res = await run_in_threadpool(run_reconcile, body["account_id"], info, body.get("transactions") or [],
-                                      body.get("balance"), body.get("as_of"), body.get("use_llm", True))
+                                      body.get("balance"), body.get("as_of"), body.get("use_llm", True),
+                                      body.get("statement_date") or None)
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
     if body.get("uploadId"):

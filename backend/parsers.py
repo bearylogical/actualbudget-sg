@@ -347,6 +347,12 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
             )
         )
         txns[-1]["pending"] = pending
+        if not pending and not new_format:
+            # card statement balances are cut by POSTING date — reconcile needs it
+            try:
+                txns[-1]["posting_date"] = pd.to_datetime(posting, format="%d %b %Y").strftime("%Y-%m-%d")
+            except Exception:
+                pass
         if new_format and "available balance" in cols_lower:
             # bank's running balance after this row — lets reconciliation pinpoint the first bad day
             txns[-1]["running_balance"] = _to_float(row.get(cols_lower["available balance"]))
