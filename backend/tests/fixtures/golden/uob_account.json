@@ -14,60 +14,98 @@
   "transactions": [
     {
       "date": "2026-12-02",
-      "description": "PAYNOW-FAST - EXAMPLE PAY PTE. LTD.",
-      "merchant": null,
-      "match_text": null,
-      "amount": 2.4,
+      "description": "PAYNOW-FAST OTHR Transfer - Mobile PIB2612020000000011 ALEX EXAMPLE",
+      "merchant": "ALEX EXAMPLE",
+      "match_text": "PAYNOW ALEX EXAMPLE",
+      "amount": 25.0,
       "currency": "SGD",
       "is_credit": false,
       "foreign_amount": null,
       "foreign_currency": null,
-      "ref": "PIB2612020000000001",
-      "imported_id": "ref-PIB2612020000000001",
+      "ref": "PIB2612020000000011",
+      "imported_id": "ref-PIB2612020000000011",
       "legacy_ids": [
-        "849a868c4ed15b48"
+        "20294d9c389b3efa",
+        "fd782609858082f2"
+      ]
+    },
+    {
+      "date": "2026-12-05",
+      "description": "PAYNOW-FAST MX EXAMPLE BAKERY MBK2612050000000013",
+      "merchant": "EXAMPLE BAKERY",
+      "match_text": "EXAMPLE BAKERY",
+      "amount": 6.2,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "MBK2612050000000013",
+      "imported_id": "ref-MBK2612050000000013",
+      "legacy_ids": [
+        "9b3fdba9288274db",
+        "6c593f6929368ada"
+      ]
+    },
+    {
+      "date": "2026-12-07",
+      "description": "NETS Debit-Consumer EXAMPLE MART123456789 xxxxxx4421",
+      "merchant": "EXAMPLE MART",
+      "match_text": "EXAMPLE MART",
+      "amount": 32.15,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "67020bc34ba33bc9",
+      "legacy_ids": [
+        "d1717d288a1cf27e"
       ]
     },
     {
       "date": "2026-12-15",
-      "description": "Inward Credit-FAST - Transfer OTHR Other - JANE EXAMPLE",
-      "merchant": null,
-      "match_text": null,
-      "amount": 3500.0,
+      "description": "Inward Credit-FAST Transfer OTHR Other JANE EXAMPLE",
+      "merchant": "JANE EXAMPLE",
+      "match_text": "JANE EXAMPLE",
+      "amount": 500.0,
       "currency": "SGD",
       "is_credit": true,
       "foreign_amount": null,
       "foreign_currency": null,
       "ref": null,
-      "imported_id": "8b8d061c72845de2",
-      "legacy_ids": []
+      "imported_id": "3db59d1d47df6430",
+      "legacy_ids": [
+        "5a93300443b92541"
+      ]
     },
     {
       "date": "2026-12-20",
-      "description": "NETS Debit-Consumer - KOPI CORNER 123456789",
-      "merchant": null,
-      "match_text": null,
-      "amount": 12.5,
+      "description": "Bill Payment Bill payment mBK-UCF 8028300107",
+      "merchant": "UCF",
+      "match_text": "UCF",
+      "amount": 120.0,
       "currency": "SGD",
       "is_credit": false,
       "foreign_amount": null,
       "foreign_currency": null,
       "ref": null,
-      "imported_id": "9e419dc1a402f174",
-      "legacy_ids": []
+      "imported_id": "de03f5c786b9fd4f",
+      "legacy_ids": [
+        "6c6690880cdc0d4f"
+      ]
     },
     {
       "date": "2026-12-31",
       "description": "Interest Credit",
       "merchant": null,
       "match_text": null,
-      "amount": 0.35,
+      "amount": 0.42,
       "currency": "SGD",
       "is_credit": true,
       "foreign_amount": null,
       "foreign_currency": null,
       "ref": null,
-      "imported_id": "a1409a23b6dab39c",
+      "imported_id": "c02170ee37263e64",
       "legacy_ids": []
     }
   ]

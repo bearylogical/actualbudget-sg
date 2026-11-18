@@ -39,6 +39,7 @@ CASES = {
     "dbs_legacy.csv": "DBS/POSB",
     "dbs_digibank.csv": "DBS/POSB",
     "ocbc.csv": "OCBC",
+    "ocbc_360.csv": "OCBC",
     "uob_card.txt": "UOB",
     "uob_account.txt": "UOB",
 }
@@ -117,17 +118,50 @@ def test_uob_card_pdf(monkeypatch):
     assert payment["is_credit"] and payment["amount"] == 1234.56 and payment["ref"] is None
 
 
+def test_uob_card_pdf_statement_balance(monkeypatch):
+    _, _, info = _parse("uob_card.txt", monkeypatch)
+    assert (info.balance, info.balance_is_owed) == (62.70, True)   # TOTAL BALANCE line
+    assert info.period_end == "2027-01-05"                          # statement date, not last row
+    assert parsers.pdf_card_balance("  TOTAL BALANCE FOR UOB ONE CARD    12.00 CR") == -12.00
+    assert parsers.pdf_card_balance("no totals here") is None
+
+
 def test_uob_account_pdf_reads_columns_not_balance(monkeypatch):
     txns, _, info = _parse("uob_account.txt", monkeypatch)
     assert [(t["amount"], t["is_credit"]) for t in txns] == [
-        (2.40, False), (3500.00, True), (12.50, False), (0.35, True),
-    ]
-    paynow, inward, nets, _interest = txns
-    assert paynow["ref"] == "PIB2612020000000001"
-    assert paynow["description"] == "PAYNOW-FAST - EXAMPLE PAY PTE. LTD."
-    assert "JANE EXAMPLE" in inward["description"]
-    assert "xxxx" not in nets["description"]        # masked card line dropped as noise
+        (25.00, False), (6.20, False), (32.15, False), (500.00, True), (120.00, False), (0.42, True),
+    ]                                                   # B/F, Total and post-"End" rows skipped
+    paynow = txns[0]
+    assert paynow["ref"] == "PIB2612020000000011"
+    assert (paynow["merchant"], paynow["match_text"]) == ("ALEX EXAMPLE", "PAYNOW ALEX EXAMPLE")
     assert info.last4 == "5678"
+
+
+def test_uob_account_pdf_and_xls_give_the_same_ids(monkeypatch):
+    """The same row from the PDF and the .xls export must dedupe against each other."""
+    xls = {t["imported_id"]: t for t in _parse("uob_one_account.csv", monkeypatch)[0]}
+    for t in _parse("uob_account.txt", monkeypatch)[0]:
+        assert t["imported_id"] in xls, t["description"]
+        twin = xls[t["imported_id"]]
+        assert (t["description"], t["merchant"], t["match_text"]) == (
+            twin["description"], twin["merchant"], twin["match_text"])
+
+
+def test_uob_account_pdf_keeps_pre_rejoin_ids(monkeypatch):
+    """PDF rows used to be described as "LINE1 - LINE2"; those ids stay as legacy ids."""
+    nets = next(t for t in _parse("uob_account.txt", monkeypatch)[0] if t["date"] == "2026-12-07")
+    old = parsers._hash_id("2026-12-07", "NETS Debit-Consumer - EXAMPLE MART123456789", 32.15, "SGD")
+    assert old in nets["legacy_ids"]
+
+
+def test_uob_xls_picks_up_a_bare_bank_ref():
+    df = pd.DataFrame([
+        ["Transaction Date", "Transaction Description", "Withdrawal", "Deposit"],
+        ["02 Dec 2026", "PAYNOW-FAST PIB2612020000000099 SOMEONE", "5.00", ""],
+    ])
+    (t,) = parsers.parse_uob(df)
+    assert t["imported_id"] == "ref-PIB2612020000000099"
+    assert parsers._hash_id("2026-12-02", t["description"], 5.0, "SGD") in t["legacy_ids"]
 
 
 def test_uob_one_account_export(monkeypatch):
@@ -160,7 +194,13 @@ def test_dbs_legacy(monkeypatch):
         ("2026-12-03", 12.30, False), ("2026-12-05", 250.00, True),
         ("2026-12-08", 8.00, False), ("2026-12-10", 1250.00, False),
     ]                                                    # "Total" row skipped
-    assert txns[0]["ref"] == "EXAMPLE MART SINGAPORE"
+    pos, ict, adv, _giro = txns
+    # description from Ref1-3 like digibank, not the bare code
+    assert pos["description"] == "EXAMPLE MART SINGAPORE 5548-0000 0001"
+    assert pos["merchant"] == "EXAMPLE MART SINGAPORE" and ict["merchant"] == "JOHN EXAMPLE"
+    # ids from the old parser (Ref1 as ref, or a hash of the code) still match
+    assert "ref-EXAMPLE MART SINGAPORE" in pos["legacy_ids"]
+    assert adv["description"] == "ADV" and adv["imported_id"] == parsers._hash_id("2026-12-08", "ADV", 8.0, "SGD")
 
 
 def test_ocbc(monkeypatch):
@@ -171,6 +211,15 @@ def test_ocbc(monkeypatch):
     assert [t["date"] for t in txns] == ["2026-12-01", "2026-12-03", "2026-12-05"]   # dd/mm, not mm/dd
     assert txns[1]["amount"] == 1200.00 and txns[1]["imported_id"] == "ref-REF0002"
     assert txns[2]["is_credit"] and txns[2]["ref"] is None
+
+
+def test_ocbc_360_transaction_date_header(monkeypatch):
+    txns, bank, info = _parse("ocbc_360.csv", monkeypatch)
+    assert bank == "OCBC" and len(txns) == 3
+    assert txns[0]["date"] == "2026-11-28"               # Transaction date, not Value date
+    assert txns[1]["is_credit"] and txns[1]["amount"] == 3800.00
+    assert txns[2]["description"] == "PAYNOW TRANSFER"
+    assert info.last4 == "0002"
 
 
 # ── detection ────────────────────────────────────────────────────────────────

@@ -6,9 +6,9 @@
     "account_type": "",
     "last4": "4321",
     "period_start": "2026-12-27",
-    "period_end": "2027-01-04",
-    "balance": null,
-    "balance_is_owed": false,
+    "period_end": "2027-01-05",
+    "balance": 62.7,
+    "balance_is_owed": true,
     "skipped_pending": 0
   },
   "transactions": [
