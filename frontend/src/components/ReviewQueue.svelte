@@ -21,6 +21,8 @@
   let kindFilter = '';          // '' = all kinds
   let categoryGroups = [];      // for overriding a proposed category
   let override = {};            // item id → category id picked instead of the proposal
+  let hunt = null;              // last AI hunt: { explanation, findings, queued, scanned, window }
+  let huntFocus = '';           // optional free-text focus for the hunt
   let nudge = null;             // { payee, category, categoryId, ids } after approving a category fix
   const normPayee = (t) => (t.payee || t.imported_payee || '').trim().toLowerCase();
 
@@ -158,6 +160,16 @@
     catch (e) { error = e.message; }
     await load();
   }
+  async function runHunt() {
+    loading = true; note = ''; error = ''; hunt = null;
+    try {
+      const r = await post('/review/hunt', { days: 90, instructions: huntFocus });
+      hunt = r;
+      note = `AI hunt: checked ${r.scanned} row(s), queued ${r.queued.length}, flagged ${r.findings.length}`;
+      dispatch('changed');
+    } catch (e) { error = e.message; }
+    await load();
+  }
   async function acceptAI() {
     loading = true; note = ''; error = '';
     try {
@@ -211,6 +223,11 @@
         <button class="ghost small" on:click={refreshSuggestions} disabled={loading || !items.some(i => i.kind === 'recategorize')}
           title="Re-check waiting category fixes against your latest rules, mappings and history">↻ Refresh suggestions</button>
         <button class="ghost small" on:click={advise} disabled={loading || !items.some(i => i.kind !== 'recategorize')}>🤖 Ask AI</button>
+        <span class="hunt">
+          <input class="small" placeholder="AI hunt focus (optional), e.g. Grab charges" bind:value={huntFocus} disabled={loading} />
+          <button class="ghost small" on:click={runHunt} disabled={loading}
+            title="An AI agent searches the last 90 days of Actual for duplicates and unreconciled transfers the rules miss, and queues what it finds here">🕵 AI hunt (90 days)</button>
+        </span>
         <button class="ghost small" on:click={acceptAI} disabled={loading || !aiCount}>✓ Accept suggestions ≥80%</button>
         {#if kinds.length > 1}
           <select class="small" bind:value={kindFilter}>
@@ -223,6 +240,26 @@
       </div>
     {/if}
     {#if error}<div class="error-msg">{error}</div>{/if}
+    {#if hunt && tab === 'pending'}
+      <div class="hunt-out">
+        <div class="item-head"><span class="kind">AI hunt · {hunt.window.start} → {hunt.window.end}</span>
+          <button class="ghost small close" on:click={() => (hunt = null)}>Close</button></div>
+        {#if hunt.explanation}<p>{hunt.explanation}</p>{/if}
+        {#each hunt.findings as f}
+          <div class="finding">
+            <span class="ai-badge">{f.kind.replace('_', ' ')}</span> {f.note}
+            {#each f.rows as r}
+              <div class="row">
+                <span class="tag">{r.src}</span><span>{r.date}</span>
+                <span class="amt" class:pos={r.amount > 0}>{money(r.amount)}</span>
+                <span class="payee">{r.payee ?? '—'}</span><span class="muted acct">{r.account}</span>
+                <span class="muted text">{r.text}</span>
+              </div>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if nudge}
       <div class="nudge">
         <span>Apply <strong>{nudge.category}</strong> to the {nudge.ids.length} other “{nudge.payee}” transaction{nudge.ids.length > 1 ? 's' : ''} waiting?</span>
@@ -337,5 +374,11 @@
   .muted { color: var(--text2); font-size: 12px; }
   .mem { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
   .mem span:first-child { flex: 1; }
+  .hunt { display: inline-flex; gap: 6px; align-items: center; }
+  .hunt input { min-width: 220px; }
+  .hunt-out { background: var(--surface2); border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  .hunt-out p { margin: 0; }
+  .hunt-out .close { margin-left: auto; }
+  .finding { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border-soft); padding-top: 6px; }
   .nudge { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0; padding: 10px 14px; border-radius: 10px; background: #1b1a33; border: 1px solid var(--accent); font-size: 13px; }
 </style>

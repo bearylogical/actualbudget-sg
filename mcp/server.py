@@ -198,6 +198,16 @@ def review_ask_ai() -> dict:
 
 
 @write_tool()
+def review_hunt(days: int = 90, instructions: str = "") -> dict:
+    """Have the configured LLM agent search Actual (last N days) for duplicates and unreconciled
+    transfers beyond what review_scan's strict rules catch. It only QUEUES proposals (with its
+    reason as the AI verdict) and returns `findings` it could not fix safely (e.g. a card payment
+    whose two legs differ in amount). instructions: optional focus, e.g. "check Grab charges".
+    Changes nothing in Actual — approve items with review_decide after the user says yes."""
+    return _req("POST", "/review/hunt", {"days": days, "instructions": instructions}, timeout=600)
+
+
+@write_tool()
 def review_decide(item_id: str, decision: str, category_id: str = "") -> dict:
     """APPLY a decision to Actual. Only call after the user explicitly approved this item.
     Decisions: import_duplicate: skip|import · existing_duplicate: delete_a|delete_b|keep_both ·
