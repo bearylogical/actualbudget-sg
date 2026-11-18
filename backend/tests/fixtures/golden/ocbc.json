@@ -1,0 +1,62 @@
+{
+  "bank": "OCBC",
+  "info": {
+    "bank": "OCBC",
+    "kind": "unknown",
+    "account_type": "",
+    "last4": "",
+    "period_start": "2026-12-01",
+    "period_end": "2026-12-05",
+    "balance": null,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-01",
+      "description": "NETS QR EXAMPLE HAWKER",
+      "merchant": null,
+      "match_text": null,
+      "amount": 4.5,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "REF0001",
+      "imported_id": "ref-REF0001",
+      "legacy_ids": [
+        "8f92917db582147c"
+      ]
+    },
+    {
+      "date": "2026-12-03",
+      "description": "GIRO - EXAMPLE UTILITIES",
+      "merchant": null,
+      "match_text": null,
+      "amount": 1200.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "REF0002",
+      "imported_id": "ref-REF0002",
+      "legacy_ids": [
+        "132c1c0376bba4a3"
+      ]
+    },
+    {
+      "date": "2026-12-05",
+      "description": "FAST PAYMENT FROM SAM EXAMPLE",
+      "merchant": null,
+      "match_text": null,
+      "amount": 80.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "2f7ca42b5bb57245",
+      "legacy_ids": []
+    }
+  ]
+}

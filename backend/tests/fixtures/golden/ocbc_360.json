@@ -1,0 +1,58 @@
+{
+  "bank": "OCBC",
+  "info": {
+    "bank": "OCBC",
+    "kind": "deposit",
+    "account_type": "360 Account",
+    "last4": "0002",
+    "period_start": "2026-11-28",
+    "period_end": "2026-12-04",
+    "balance": null,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-11-28",
+      "description": "DEBIT PURCHASE EXAMPLE GROCER",
+      "merchant": null,
+      "match_text": null,
+      "amount": 56.7,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "0e05d95058dc75b3",
+      "legacy_ids": []
+    },
+    {
+      "date": "2026-12-02",
+      "description": "SALARY EXAMPLE CO",
+      "merchant": null,
+      "match_text": null,
+      "amount": 3800.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "7f4ce3f59dd17ab5",
+      "legacy_ids": []
+    },
+    {
+      "date": "2026-12-04",
+      "description": "PAYNOW TRANSFER",
+      "merchant": null,
+      "match_text": null,
+      "amount": 20.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "27f2cbfc46a8a14f",
+      "legacy_ids": []
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+UNITED OVERSEAS BANK LIMITED
+Credit Card(s) Statement
+Statement Date 05 JAN 2027
+Card Number: 5522 9900 0000 4321
+
+Post     Trans
+Date     Date     Description of Transaction                    Transaction Amount
+                                                                       SGD
+                  PREVIOUS BALANCE                                    1,234.56
+28 DEC   27 DEC   EXAMPLE BOOKSHOP SINGAPORE                            45.90
+                  Ref No. : 74000000000000000000001
+02 JAN   31 DEC   STREAMCO.COM      AMSTERDAM NL                        19.38
+                  Ref No. : 74000000000000000000002
+                  USD 14.99
+03 JAN   02 JAN   PAYMT THRU E-BANK/HOMEB/CYBERB (EP52)              1,234.56 CR
+03 JAN   03 JAN   BUS/MRT 846451010 SINGAPORE                            2.36
+                  Ref No. : 74000000000000000000003
+04 JAN   04 JAN   CASHBACK REBATE                                        5.00 CR
+                  SUB TOTAL                                          1,171.86 CR
+                  TOTAL BALANCE FOR UOB ONE CARD                        62.70
+--------------------------- End of Transaction Details ---------------------------
+05 JAN   05 JAN   SHOULD NOT BE PARSED                                  99.99

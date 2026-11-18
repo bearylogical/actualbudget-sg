@@ -111,6 +111,7 @@ def _clean_ref(raw) -> Optional[str]:
 # ("Ref No: 7412345…"), account rows a PayNow/bank reference ("PIB1234…").
 _REF_LABELLED = re.compile(r"^Ref No\.?\s*:\s*(\S+)$", re.IGNORECASE)
 _REF_BARE = re.compile(r"^(?:PIB|MBK)\d{10,}$", re.IGNORECASE)
+_REF_TOKEN = re.compile(r"\b(?:PIB|MBK)\d{10,}\b", re.IGNORECASE)   # same, anywhere in a line
 
 # Identifier-only lines that add nothing to a payee description.
 _DESC_NOISE = (
@@ -333,6 +334,9 @@ def parse_uob(df: pd.DataFrame) -> list[dict]:
             acct_name, acct_ref, match_text = _uob_account_parts(_clean_desc(description))
             merchant = acct_name or merchant
             ref = ref or acct_ref
+            if not ref:   # same rule as the PDF parser, so both formats share an id
+                token = _REF_TOKEN.search(description)
+                ref = token.group().upper() if token else None
         txns.append(
             _std(
                 date_str,
@@ -374,9 +378,10 @@ def _dbs_merchant(code: str, r1: str, r2: str, r3: str) -> Optional[str]:
     code = code.upper()
     if code in ("MST", "POS", "NETS", "UMC", "VISA"):
         return _DATE_SUFFIX.sub("", r1).strip() or None
-    m = re.match(r"^\s*(?:to|from)\s*:\s*(.+)$", r2, re.I)
-    if m:
-        return m.group(1).strip()
+    for r in (r2, r1):
+        m = re.match(r"^\s*(?:to|from)\s*:\s*(.+)$", r, re.I)
+        if m:
+            return m.group(1).strip()
     m = re.match(r"^\s*ib\s*:\s*(.+)$", r2, re.I)
     if m:
         return m.group(1).strip()
@@ -385,9 +390,13 @@ def _dbs_merchant(code: str, r1: str, r2: str, r3: str) -> Optional[str]:
     return None
 
 
-def parse_dbs_v2(df: pd.DataFrame, header_row: int) -> list[dict]:
+def parse_dbs_v2(df: pd.DataFrame, header_row: int, code_col: str = "transaction code") -> list[dict]:
     """Current digibank CSV: Transaction Date, Transaction Code, Description,
-    Transaction Ref1-3, Status, Debit Amount, Credit Amount."""
+    Transaction Ref1-3, Status, Debit Amount, Credit Amount.
+
+    The older export (code_col="reference") has the code under "Reference" and no
+    Description or Status: the description is rebuilt from Ref1-3, as digibank does."""
+    legacy_format = code_col != "transaction code"
     df = df.copy()
     df.columns = [str(c).strip() for c in df.iloc[header_row]]
     data = df.iloc[header_row + 1 :].reset_index(drop=True)
@@ -409,7 +418,7 @@ def parse_dbs_v2(df: pd.DataFrame, header_row: int) -> list[dict]:
         status = g(row, "status")
         if status and status.lower() not in ("settled", "posted", "completed"):
             continue  # pending rows re-appear with final details later
-        code = g(row, "transaction code")
+        code = g(row, code_col)
         desc_col = g(row, "description")
         r1, r2, r3 = (
             g(row, "transaction ref1"),
@@ -428,6 +437,8 @@ def parse_dbs_v2(df: pd.DataFrame, header_row: int) -> list[dict]:
         except Exception:
             continue
 
+        if legacy_format and not desc_col:
+            desc_col = " ".join(r for r in (r1, r2, r3) if r)
         desc = re.sub(r"\s+", " ", desc_col).strip()
         hint = _DBS_CODE_HINT.get(code.upper())
         if hint and hint.lower() not in desc.lower():
@@ -448,6 +459,8 @@ def parse_dbs_v2(df: pd.DataFrame, header_row: int) -> list[dict]:
         legacy.append(
             _hash_id(date_str, _clean_desc(desc_col), amount, "SGD")
         )  # old hash
+        if legacy_format:   # the old generic parser hashed the code as the description
+            legacy.append(_hash_id(date_str, _clean_desc(code), amount, "SGD"))
         txns.append(
             _std(
                 date_str,
@@ -477,6 +490,8 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
     header_vals = [str(v).strip().lower() for v in df.iloc[header_row].values]
     if "transaction ref1" in header_vals and "transaction code" in header_vals:
         return parse_dbs_v2(df, header_row)
+    if "transaction ref1" in header_vals and "reference" in header_vals:
+        return parse_dbs_v2(df, header_row, code_col="reference")
 
     df = df.copy()
     df.columns = [str(c).strip() for c in df.iloc[header_row]]
@@ -526,11 +541,14 @@ def parse_dbs(df: pd.DataFrame) -> list[dict]:
 # ── OCBC ──────────────────────────────────────────────────────────────────────
 
 
+_OCBC_DATE_HEADERS = ("date", "transaction date")
+
+
 def parse_ocbc(df: pd.DataFrame) -> list[dict]:
     header_row = None
     for i, row in df.iterrows():
         vals = [str(v).strip().lower() for v in row.values]
-        if "date" in vals and any("withdrawal" in v or "debit" in v for v in vals):
+        if any(v in _OCBC_DATE_HEADERS for v in vals) and any("withdrawal" in v or "debit" in v for v in vals):
             header_row = i
             break
     if header_row is None:
@@ -543,8 +561,10 @@ def parse_ocbc(df: pd.DataFrame) -> list[dict]:
     col_map: dict[str, str] = {}
     for col in data.columns:
         cl = col.lower()
-        if cl == "date":
+        if cl in _OCBC_DATE_HEADERS:
             col_map["date"] = col
+        elif "date" in cl:
+            continue  # "Value date": settlement day, not when it happened
         elif "withdrawal" in cl or "debit" in cl:
             col_map["debit"] = col
         elif "deposit" in cl or "credit" in cl:
@@ -598,6 +618,21 @@ _PDF_STMT_DATE = re.compile(
     rf"Statement\s+Date\s+(\d{{1,2}}\s+(?:{_MONTHS})\s+\d{{4}})", re.IGNORECASE
 )
 _PDF_TXN_END = re.compile(r"End of Transaction Details", re.IGNORECASE)
+_PDF_CARD_TOTAL = re.compile(
+    rf"^\s*TOTAL BALANCE FOR\b.*?\s(?P<amount>{_AMOUNT})(?:\s+(?P<cr>CR))?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def pdf_card_balance(text: str) -> Optional[float]:
+    """Amount owed on a card statement ("TOTAL BALANCE FOR …"); CR = in credit.
+    Multi-card statements print one total per card — the first card's is used,
+    matching the card number parse_statement reads."""
+    m = _PDF_CARD_TOTAL.search(_pdf_normalise(text))
+    if not m:
+        return None
+    amount = float(m.group("amount").replace(",", ""))
+    return -amount if m.group("cr") else amount
 
 
 def _pdf_normalise(text: str) -> str:
@@ -783,13 +818,26 @@ def parse_uob_account_pdf(text: str) -> list[dict]:
         entry, pending = pending, None
         if entry["withdrawal"] is None and entry["deposit"] is None:
             return  # opening balance row
-        desc, ref = _desc_and_ref("\n".join(entry["lines"]))
-        if not desc:
+        old_desc, ref = _desc_and_ref("\n".join(entry["lines"]))
+        if not old_desc:
             return
         amount = (
             -entry["deposit"] if entry["deposit"] is not None else entry["withdrawal"]
         )
-        txns.append(_std(entry["date"], desc, amount, ref=ref))
+        # The .xls export prints each row on one line; the PDF wraps the same text.
+        # Rejoining gives both formats the same description, payee and hash id, so
+        # uploading the PDF and the .xls for one period can't import a row twice.
+        desc = re.sub(r"\s+", " ", " ".join(entry["lines"])).strip()
+        name, acct_ref, match_text = _uob_account_parts(desc)
+        if not ref:
+            ref = acct_ref
+        txns.append(
+            _std(
+                entry["date"], desc, amount, ref=ref, merchant=name, match_text=match_text,
+                # id this row had before the rejoin, so earlier PDF imports still match
+                legacy_ids=[_hash_id(entry["date"], old_desc, amount, "SGD")],
+            )
+        )
 
     for line in lines:
         if _PDF_TXN_END.search(line):
@@ -1006,6 +1054,13 @@ def parse_statement(content: bytes, filename: str = ""):
         if m:
             digits = re.sub(r"\D", "", m.group(1))
             info.last4 = digits[-4:]
+        if label == "UOB Credit Card":
+            balance = pdf_card_balance(text)
+            if balance is not None:
+                info.balance, info.balance_is_owed = balance, True
+                info.evidence.append("statement balance from TOTAL BALANCE line")
+            if _PDF_STMT_DATE.search(_pdf_normalise(text)):
+                info.period_end = _pdf_statement_date(text).strftime("%Y-%m-%d")
         return _finalise(txns, info), bank, info
     df = load_table(content, filename)
     txns, bank = detect_and_parse(df, hint=filename)

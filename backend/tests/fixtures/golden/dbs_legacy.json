@@ -1,0 +1,86 @@
+{
+  "bank": "DBS/POSB",
+  "info": {
+    "bank": "DBS/POSB",
+    "kind": "deposit",
+    "account_type": "DBS Multiplier Account",
+    "last4": "0009",
+    "period_start": "2026-12-03",
+    "period_end": "2026-12-31",
+    "balance": 2345.67,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-03",
+      "description": "EXAMPLE MART SINGAPORE 5548-0000 0001",
+      "merchant": "EXAMPLE MART SINGAPORE",
+      "match_text": null,
+      "amount": 12.3,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "0406fb928183c3f9d64f",
+      "imported_id": "ref-0406fb928183c3f9d64f",
+      "legacy_ids": [
+        "ref-EXAMPLE MART SINGAPORE",
+        "e39c227b796fdb14",
+        "dc8fcd7e264a29b7"
+      ]
+    },
+    {
+      "date": "2026-12-05",
+      "description": "FROM: JOHN EXAMPLE 0002",
+      "merchant": "JOHN EXAMPLE",
+      "match_text": null,
+      "amount": 250.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "8bd9d35ea64984f952e2",
+      "imported_id": "ref-8bd9d35ea64984f952e2",
+      "legacy_ids": [
+        "ref-FROM: JOHN EXAMPLE",
+        "f812c7aa08ab3582",
+        "091967180f9795d3"
+      ]
+    },
+    {
+      "date": "2026-12-08",
+      "description": "ADV",
+      "merchant": null,
+      "match_text": null,
+      "amount": 8.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "351f53b25110247c",
+      "legacy_ids": [
+        "881297da34dc3c2e"
+      ]
+    },
+    {
+      "date": "2026-12-10",
+      "description": "EXAMPLE TOWN COUNCIL 0003",
+      "merchant": null,
+      "match_text": null,
+      "amount": 1250.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "e3de2c3aaa565d80100f",
+      "imported_id": "ref-e3de2c3aaa565d80100f",
+      "legacy_ids": [
+        "ref-EXAMPLE TOWN COUNCIL",
+        "01e13a9b5ece051b",
+        "29b5d89258cc3344"
+      ]
+    }
+  ]
+}
