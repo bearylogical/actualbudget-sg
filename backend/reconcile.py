@@ -519,3 +519,34 @@ def agent(report: dict, statement_rows: list[dict], llm) -> dict:
     queued = queue(report, proposals, source=f"llm:{llm.model}")
     return {"explanation": res["text"], "tool_calls": [{"tool": c["tool"], "args": c["args"]} for c in res["calls"]],
             "queued": queued}
+
+
+# ── Running a reconcile against Actual ───────────────────────────────────────
+
+def run(account_id: str, info: StatementInfo, statement_rows: list[dict], balance: float | None = None,
+        as_of: str | None = None, use_llm: bool = True, statement_date: str | None = None,
+        gateway=None) -> dict:
+    """Fetch what analyse() needs through the Actual gateway, explain the gap, queue fixes.
+    → {report, explanation, queued, engine}"""
+    import actual_gateway
+    from llm import LLMCategorizer
+    gateway = gateway or actual_gateway.default()
+    as_of = as_of or info.period_end or max((t["date"] for t in statement_rows), default=_date.today().isoformat())
+    start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
+    rows, accts = gateway.txns(EPOCH, as_of, [account_id])
+    others, _ = gateway.txns(start, as_of)
+    others = [t for t in others if t["account"] != account_id]
+    name = next((a["name"] for a in accts if a["id"] == account_id), account_id)
+    if statement_date:      # cards keep a fixed statement day — remember it for next time
+        remember_cycle_day(account_id, statement_date)
+    report = analyse(account_id, info, statement_rows, rows, balance, as_of, name, others,
+                     statement_date=statement_date, cycle_day=cycle_day(account_id))
+    llm = LLMCategorizer() if use_llm else None
+    if llm is not None and llm.enabled and not report["reconciled"]:
+        try:
+            ag = agent(report, statement_rows, llm)
+            return {"report": report, "explanation": ag["explanation"], "tool_calls": ag["tool_calls"],
+                    "queued": ag["queued"], "engine": "llm"}
+        except Exception as e:   # fall back to the deterministic plan
+            report["llm_error"] = str(e)[:300]
+    return {"report": report, "explanation": None, "queued": queue(report), "engine": "rules"}

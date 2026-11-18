@@ -339,3 +339,50 @@ def recommend(info: StatementInfo, transactions: list[dict], accounts: list[dict
         "auto_select": auto,
         "remembered": remembered,
     }
+
+
+# ── choosing the account without a person ─────────────────────────────────────
+
+def _find_account(target, accounts: list[dict]) -> dict | None:
+    for a in accounts:
+        if a.get("id") == target or a.get("name", "").strip().lower() == str(target).strip().lower():
+            return a
+    return None
+
+
+def resolve(info: StatementInfo, rec: dict, accounts: list[dict], filename: str = "",
+            routes: dict | None = None, fallback: str | None = None) -> tuple[str | None, str]:
+    """
+    → (account_id, why), or (None, why not). Order:
+      1. remembered — this card/account number was imported somewhere before
+      2. routes — keys matched against "bank kind account-type last4 filename",
+         e.g. {"2583": "UOB One Card", "uob deposit": "UOB One Account", "posb": "POSB"}
+      3. the recommender, only if confident (AUTO_MIN_SCORE / AUTO_MIN_MARGIN)
+      4. the fallback account
+    Never guesses between close candidates. rec: recommend()'s result; accounts: open accounts.
+    Raises ValueError when a route names an account that doesn't exist.
+    """
+    open_accounts = [a for a in accounts if not a.get("closed")]
+    remembered = rec.get("remembered")
+    if remembered and _find_account(remembered, open_accounts):
+        return remembered, f"remembered for {info.label}"
+
+    haystack = " ".join([info.bank, info.kind.replace("_", " "), info.kind, info.account_type,
+                         info.last4, filename]).lower()
+    for key in sorted(routes or {}, key=len, reverse=True):      # longest first: "uob deposit" beats "uob"
+        if all(part in haystack for part in key.lower().split()):
+            a = _find_account(routes[key], open_accounts)
+            if not a:
+                raise ValueError(f"ACCOUNT_ROUTES['{key}'] → '{routes[key]}' not found (or closed) in Actual")
+            return a["id"], f"ACCOUNT_ROUTES['{key}']"
+
+    if rec.get("auto_select") and rec.get("suggestions"):
+        top = rec["suggestions"][0]
+        return top["account_id"], f"recommended ({'; '.join(top.get('reasons') or [])})"
+
+    if fallback and _find_account(fallback, open_accounts):
+        return _find_account(fallback, open_accounts)["id"], "ACTUAL_ACCOUNT_ID fallback"
+    close = ", ".join(f"{s['name']}={s['score']}" for s in (rec.get("suggestions") or [])[:3])
+    return None, (f"Can't tell which account {info.label} belongs to"
+                  + (f" (closest: {close})" if close else "")
+                  + " — import it once in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")

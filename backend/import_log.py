@@ -3,7 +3,7 @@ Import history — an audit trail of every statement file, from the web UI or th
 
 One row per uploaded / dropped file:
 
-  ui         created at /parse (status "parsed"), completed by /actual/import ("imported" /
+  ui         created at POST /imports (status "parsed"), completed by its commit ("imported" /
              "nothing_new"), "undone" if you undo it; an upload you never imported stays "parsed"
   scheduler  created when the file is picked up, "imported" / "nothing_new" or "failed"
              (with the stage it failed at and the error)
@@ -15,8 +15,10 @@ queued, the reconciliation result, and any errors. The original file is kept in
 DATA_DIR/statements/ (KEEP_STATEMENTS=false to turn that off) so you can download exactly
 what was imported.
 
-The SHA-256 also answers "have I imported this exact file before?" — /parse returns earlier
+The SHA-256 also answers "have I imported this exact file before?" — a preview returns earlier
 imports of the same file.
+
+Each row is also an Import session's state (see statement_import.py).
 
 Storage: SQLite DATA_DIR/imports.db, shared by backend and scheduler.
 """
@@ -38,7 +40,10 @@ STATEMENTS_DIR = DATA_DIR / "statements"
 KEEP_STATEMENTS = os.getenv("KEEP_STATEMENTS", "true").lower() == "true"
 
 STATUSES = {"parsed", "imported", "nothing_new", "failed", "undone"}
-JSON_COLS = ("statement", "stats", "added_ids", "review_ids", "reconcile", "errors")
+JSON_COLS = ("statement", "stats", "added_ids", "review_ids", "reconcile", "errors", "rows", "preview", "result")
+# Import session state (statement_import.py), added after the first release: parsed rows, the last
+# preview's categorised rows, and the commit result (so a repeated commit returns it).
+SESSION_COLS = ("rows", "preview", "result")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS imports (
@@ -72,6 +77,10 @@ def _db():
     con.row_factory = sqlite3.Row
     try:
         con.executescript(SCHEMA)
+        have = {r[1] for r in con.execute("PRAGMA table_info(imports)")}
+        for c in SESSION_COLS:
+            if c not in have:
+                con.execute(f"ALTER TABLE imports ADD COLUMN {c} TEXT")
         yield con
         con.commit()
     finally:
@@ -207,6 +216,8 @@ def listing(limit: int = 100, source: str = "", status: str = "", account_id: st
         rows = [_row(r) for r in con.execute(q, args).fetchall()]
     for r in rows:                       # the list doesn't need every added id
         r["added_ids_count"] = len(r.pop("added_ids") or [])
+        for c in SESSION_COLS:
+            r.pop(c, None)
     return rows
 
 

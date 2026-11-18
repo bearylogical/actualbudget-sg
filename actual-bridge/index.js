@@ -580,18 +580,6 @@ app.get('/finance/summary', async (req, res) => {
   }
 });
 
-app.post('/preview', async (req, res) => {
-  if (!requireBudget(res)) return;
-  const { accountId, startDate, endDate } = req.body;
-  try {
-    const existing = await api.getTransactions(accountId, startDate, endDate);
-    const existingIds = new Set(existing.map(t => t.imported_id).filter(Boolean));
-    res.json({ existingIds: [...existingIds], count: existing.length });
-  } catch (e) {
-    res.status(500).json({ error: errMsg(e) });
-  }
-});
-
 app.get('/budget-month/:month', async (req, res) => {
   if (!requireBudget(res)) return;
   try {
@@ -705,7 +693,7 @@ async function importHandler(req, res) {
       addedIds: result.added ?? [],   // lets the UI undo this import
       skipped,
       unreviewed: needsVerify.filter(t => verified[t.imported_id] !== 'import')
-        .map(t => ({ date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
+        .map(t => ({ imported_id: t.imported_id, date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
       errors: result.errors ?? [],
     });
   } catch (e) {

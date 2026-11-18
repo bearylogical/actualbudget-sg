@@ -52,7 +52,8 @@
   // ── Statement ─────────────────────────────────────────────────────────────────
   let transactions = [];
   let statementInfo = null;
-  let uploadId = "";        // import-history record for this file (from /parse)
+  let sessionId = "";       // the Import session on the server (POST /imports)
+  let guard = null;         // wrong-account guard for the chosen account (blocks step 1)
   let seenBefore = [];      // earlier imports of the exact same file
   let loading = false;
   let parseError = "";
@@ -76,7 +77,6 @@
   let importResult = null;
   let rulesCreated = 0;
   let scanNote = "";
-  let undoneAccountId = ""; // after an undo, re-importing here may restore the deleted rows
 
   // ── Tabs ──────────────────────────────────────────────────────────────────────
   const TABS = [
@@ -127,26 +127,24 @@
   $: aiAvailable = !!llmStatus?.enabled;
 
   // ── Upload ────────────────────────────────────────────────────────────────────
+  // The server holds the statement (an Import session); this page only sends your decisions.
   async function uploadFile(file) {
     loading = true;
     parseError = "";
     try {
-      const qs = new URLSearchParams({ account_id: "", use_llm: String(useLLM && aiAvailable) });
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${API}/parse?${qs}`, { method: "POST", body: fd });
+      const res = await fetch(`${API}/imports?use_llm=${useLLM && aiAvailable}`, { method: "POST", body: fd });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
       const data = await res.json();
       resetImport();
-      transactions = data.transactions.map((t, i) => ({ ...t, id: i }));
-      catStats = data.stats;
-      statementInfo = data.statement || null;
-      uploadId = data.upload_id || "";
-      seenBefore = data.seen_before || [];
+      transactions = [];
       accountId = "";
-      accountRec = null;
-      recAskedFor = null;
-      applyAccountRec(data.account);
+      sessionId = data.session;
+      seenBefore = data.seen_before || [];
+      applyPreview(data);
+      // pre-select only when the server is confident (remembered, or a clear recommendation)
+      if (data.account?.selected) accountId = data.account.selected;
       lastCtxKey = ctxKey;
       step = 1; reached = 1;
     } catch (e) {
@@ -157,68 +155,69 @@
   }
 
   function resetImport() {
-    importResult = null; rulesCreated = 0; scanNote = ""; undoneAccountId = "";
+    importResult = null; rulesCreated = 0; scanNote = "";
   }
   function startOver() {
-    transactions = []; statementInfo = null; uploadId = ""; seenBefore = []; accountId = ""; accountRec = null; catStats = null;
+    transactions = []; statementInfo = null; sessionId = ""; seenBefore = []; accountId = ""; accountRec = null;
+    catStats = null; guard = null;
     resetImport(); step = 1; reached = 1;
   }
 
-  // ── Account recommendation ────────────────────────────────────────────────────
-  function applyAccountRec(rec) {
-    accountRec = rec || null;
-    // pre-select only when the backend is confident; otherwise the user picks
-    if (rec?.auto_select && rec.recommended && !accountId) accountId = rec.recommended;
+  function applyPreview(data) {
+    const ack = new Map(transactions.map((t) => [t.id, t.ack]));
+    transactions = data.transactions.map((t) => ({ ...t, id: t.imported_id, ack: ack.get(t.imported_id) }));
+    catStats = data.stats;
+    statementInfo = data.statement || null;
+    accountRec = data.account || null;
+    guard = data.guard || null;
   }
-  let recAskedFor = null;
-  $: if (actualBudgetLoaded && statementInfo && !accountRec?.suggestions?.length && recAskedFor !== statementInfo) refreshAccountRec();
-  async function refreshAccountRec() {
-    if (recLoading) return;
-    recAskedFor = statementInfo;
-    recLoading = true;
-    try {
-      const res = await fetch(`${API}/accounts/recommend`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ statement: statementInfo, transactions }),
-      });
-      if (res.ok) applyAccountRec(await res.json());
-    } catch {} finally { recLoading = false; }
+
+  // ── Your decisions (sent with every preview and with the commit) ─────────────
+  function categoryDecisions(rows) {
+    const out = {};
+    for (const t of rows) {
+      if (t.source === "manual") out[t.imported_id] = { category: t.category, category_id: t.category_id || null };
+      if (t.confirmed) out[t.imported_id] = { ...(out[t.imported_id] || {}), confirmed: true };
+    }
+    return out;
   }
+  $: excluded = includeCredits ? [] : transactions.filter((t) => t.is_credit).map((t) => t.imported_id);
+  $: commitBody = { account_id: accountId, categories: categoryDecisions(transactions), exclude: excluded,
+                    use_llm: useLLM && aiAvailable, learn_rules: learnRules, reconcile_use_llm: false };
+
   function pickAccount(id) {
     if (id === accountId || importResult) return; // undo the import first to move it
     accountId = id;
     reached = Math.min(reached, 2); // later steps depend on the account
   }
 
-  // ── Re-categorise when the context changes (account, rules, categories) ──────
+  // ── Re-preview when the context changes (account, rules, categories) ─────────
   $: ctxKey = `${actualBudgetLoaded}|${accountId}|${actualRules.length}|${actualCats.length}|${useLLM}`;
   let lastCtxKey = "";
-  $: if (transactions.length && ctxKey !== lastCtxKey) recategorise();
+  $: if (sessionId && !importResult && ctxKey !== lastCtxKey) recategorise();
+  $: recLoading = recategorising;
   let changedIds = new Set();   // rows whose category changed on the last Refresh
   let refreshNote = "";
   async function recategorise(refresh = false) {
     lastCtxKey = ctxKey;
-    if (!transactions.length) return;
+    if (!sessionId) return;
     recategorising = true;
     const before = new Map(transactions.map((t) => [t.id, t.category_id || t.category]));
     try {
-      const res = await fetch(`${API}/categorize`, {
+      const res = await fetch(`${API}/imports/${sessionId}/preview`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactions, account_id: accountId || null, use_llm: useLLM && aiAvailable, refresh }),
+        body: JSON.stringify({ ...commitBody, account_id: accountId || null, refresh }),
       });
       const data = await res.json();
-      if (res.ok && refresh) {
-        changedIds = new Set(data.transactions
-          .map((t, i) => [transactions[i]?.id ?? i, t.category_id || t.category])
-          .filter(([id, c]) => before.get(id) !== c).map(([id]) => id));
-        refreshNote = `${changedIds.size} ${changedIds.size === 1 ? "category" : "categories"} changed` +
-          (data.history_size ? ` · learned from ${data.history_size} of your past transactions` : "");
-      }
       if (res.ok) {
-        transactions = data.transactions.map((t, i) => ({ ...t, id: transactions[i]?.id ?? i, ack: transactions[i]?.ack,
-          // an accepted guess stays accepted only if the category didn't change underneath it
-          confirmed: transactions[i]?.confirmed && transactions[i]?.category === t.category }));
-        catStats = data.stats;
+        if (refresh) {
+          changedIds = new Set(data.transactions.filter((t) => before.get(t.imported_id) !== (t.category_id || t.category))
+            .map((t) => t.imported_id));
+          refreshNote = `${changedIds.size} ${changedIds.size === 1 ? "category" : "categories"} changed` +
+            (data.history_size ? ` · learned from ${data.history_size} of your past transactions` : "");
+        }
+        applyPreview(data);
+        if (!accountId && data.account?.selected) accountId = data.account.selected;
       }
     } catch {} finally { recategorising = false; }
   }
@@ -240,83 +239,23 @@
     } catch {}
   }
 
-  // ── Import payload ────────────────────────────────────────────────────────────
-  // Legacy ids let re-imports of statements ingested before the current hash still match.
-  function legacyStmtId(t) {
-    return `stmt-${t.date}-${t.description}-${t.amount}`.replace(/\s+/g, "-");
-  }
-  async function legacyHash(t) {
-    const enc = new TextEncoder().encode(`${t.date}|${t.description}|${Math.abs(t.amount)}`);
-    const buf = await crypto.subtle.digest("SHA-256", enc);
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
-  }
-  async function buildPayload(dryRun, verified) {
-    const rows = await Promise.all(importable.map(async ({ ack, confirmed, ...t }) => ({
-      ...t,
-      category_id: t.category_id || undefined,
-      // an accepted AI guess is your choice now: drop #llm so it counts as your history
-      notes: (confirmed ? (t.notes || "").replace(/#llm/g, "").trim() : t.notes) || "",
-      legacy_ids: [...(t.legacy_ids || []), legacyStmtId(t), await legacyHash(t)],
-    })));
-    const payload = { accountId, dryRun, verified, transactions: rows, uploadId, accountName };
-    if (undoneAccountId && undoneAccountId === accountId) payload.reimportDeleted = true;
-    return payload;
-  }
-
-  // ── After import ──────────────────────────────────────────────────────────────
-  async function afterImport() {
+  // ── After import: the server already remembered the account, scanned and reconciled ──
+  function afterImport() {
     reached = Math.max(reached, 4);
-    await rememberAccount();
-    await scanAfterImport();
-    if (learnRules) await learnFromManualEdits();
-  }
-  async function rememberAccount() {
-    if (!statementInfo?.fingerprint || !accountId) return;
-    try {
-      await fetch(`${API}/accounts/remember`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fingerprint: statementInfo.fingerprint, account_id: accountId, account_name: accountName }),
-      });
-    } catch {}
-  }
-  async function scanAfterImport() {
-    const dates = importable.map((t) => t.date).sort();
-    if (!dates.length) return;
-    try {
-      const res = await fetch(`${API}/review/scan`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ start: dates[0], end: dates[dates.length - 1], uploadId }),
-      });
-      const d = await res.json();
-      if (res.ok) scanNote = d.queued || d.auto_applied
-        ? `${d.queued} item(s) to review${d.auto_applied ? `, ${d.auto_applied} transfer(s) linked automatically` : ""}`
-        : "";
-    } catch {}
+    const st = importResult?.steps || {};
+    rulesCreated = st.learn_rules?.created || 0;
+    const scan = st.scan || {};
+    const held = st.hold_duplicates?.held || 0;
+    const queued = (scan.queued || 0) + held;
+    scanNote = queued || scan.auto_applied
+      ? `${queued} item(s) to review${scan.auto_applied ? `, ${scan.auto_applied} linked or removed automatically` : ""}`
+      : "";
     refreshReviewCount();
   }
-  // Manual edits and accepted AI guesses become "payee is X → category" rules in Actual.
-  async function learnFromManualEdits() {
-    const seen = new Set();
-    const mappings = [];
-    for (const t of importable) {
-      if (!(t.source === "manual" || t.confirmed) || !t.category_id || !t.payee || seen.has(t.payee)) continue;
-      seen.add(t.payee);
-      mappings.push({ description: t.payee, categoryId: t.category_id });
-    }
-    if (!mappings.length) return;
-    try {
-      const res = await fetch(`${API}/actual/rules`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mappings }),
-      });
-      const data = await res.json();
-      if (res.ok) rulesCreated = data.created || 0;
-    } catch {}
-  }
   function afterUndo() {
-    undoneAccountId = accountId;
     rulesCreated = 0; scanNote = "";
     reached = 3;
+    lastCtxKey = "";   // preview again
   }
 
   // ── CSV ───────────────────────────────────────────────────────────────────────
@@ -335,7 +274,7 @@
   $: steps = [
     { n: 1, label: "Statement", sub: !statementInfo ? "Upload a file" : stepOneBlocked ? (accountId ? "Check account" : "Choose account") : accountName },
     { n: 2, label: "Categories", sub: reached < 2 ? "" : needsCount ? `${needsCount} need a look` : "All set" },
-    { n: 3, label: "Import", sub: importResult ? `${importResult.added} imported` : reached >= 3 ? "Not yet imported" : "" },
+    { n: 3, label: "Import", sub: importResult ? `${importResult.import.added} imported` : reached >= 3 ? "Not yet imported" : "" },
     { n: 4, label: "Reconcile", sub: reached >= 4 ? "Check balance" : "After import" },
   ];
   $: status = importResult ? "Imported" : transactions.length ? "Not imported" : "—";
@@ -426,6 +365,7 @@
             {recLoading}
             locked={!!importResult}
             {seenBefore}
+            {guard}
             bind:blocked={stepOneBlocked}
             on:upload={(e) => uploadFile(e.detail)}
             on:pick={(e) => pickAccount(e.detail)}
@@ -457,8 +397,8 @@
             uncategorised={uncategorisedCount}
             {includeCredits}
             credits={creditCount}
-            {buildPayload}
-            {uploadId}
+            {sessionId}
+            {commitBody}
             {rulesCreated}
             {scanNote}
             bind:result={importResult}
@@ -474,8 +414,9 @@
             {accountId}
             {accountName}
             statement={statementInfo}
-            {transactions}
-            {uploadId}
+            count={importResult?.sent_ids?.length ?? 0}
+            initial={importResult?.reconcile}
+            {sessionId}
             {aiAvailable}
             on:queued={refreshReviewCount}
             on:openReview={goReview}

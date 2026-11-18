@@ -1,6 +1,6 @@
 <!--
-  Step 3 — preview (a dry run runs automatically), resolve possible duplicates,
-  import, and offer undo. The button always names the destination account.
+  Step 3 — preview (the server dry-runs the import), resolve possible duplicates,
+  commit the Import session, and offer undo. The button always names the destination account.
 -->
 <script>
   import { createEventDispatcher } from 'svelte';
@@ -13,11 +13,11 @@
   export let uncategorised = 0;
   export let includeCredits = true;
   export let credits = 0;               // credit rows in the statement
-  export let buildPayload;              // async (dryRun) => payload
-  export let result = null;             // bound: last import result
+  export let sessionId = '';            // the Import session
+  export let commitBody = {};           // your decisions: account, categories, exclude, options
+  export let result = null;             // bound: the commit result ({import, steps, reconcile, …})
   export let rulesCreated = 0;
   export let scanNote = '';
-  export let uploadId = '';             // import-history record, marked undone on undo
 
   const API = '/api';
   const dispatch = createEventDispatcher();
@@ -28,17 +28,18 @@
   let error = '';
   let verifications = {};
 
-  $: toVerify = preview?.toVerify ?? [];
+  $: toVerify = preview?.to_verify ?? [];
   $: unresolved = toVerify.filter((t) => !verifications[t.imported_id]);
 
   async function runPreview() {
-    if (!accountId) return;
+    if (!accountId || !sessionId) return;
     previewing = true; error = ''; verifications = {};
     try {
-      const payload = await buildPayload(true, {});
-      preview = await readJson(await fetch(`${API}/actual/import`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      const d = await readJson(await fetch(`${API}/imports/${sessionId}/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(commitBody),
       }));
+      if (d.error && !d.duplicates) throw new Error(d.error);
+      preview = d.duplicates;
     } catch (e) { error = e.message; }
     finally { previewing = false; }
   }
@@ -50,9 +51,10 @@
   async function doImport() {
     importing = true; error = '';
     try {
-      const payload = await buildPayload(false, verifications);
-      result = await readJson(await fetch(`${API}/actual/import`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      const include_verified = Object.keys(verifications).filter((id) => verifications[id] === 'import');
+      result = await readJson(await fetch(`${API}/imports/${sessionId}/commit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...commitBody, include_verified }),
       }));
       dispatch('imported', result);
     } catch (e) { error = e.message; }
@@ -60,17 +62,20 @@
   }
 
   async function undo() {
-    if (!result?.addedIds?.length) return;
+    if (!imported?.addedIds?.length) return;
     undoing = true; error = '';
     try {
-      await readJson(await fetch(`${API}/actual/undo-import`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: result.addedIds, uploadId }),
-      }));
+      await readJson(await fetch(`${API}/imports/${sessionId}/undo`, { method: 'POST' }));
       result = null; lastKey = '';
       dispatch('undone');
     } catch (e) { error = e.message; }
     finally { undoing = false; }
   }
+
+  $: imported = result?.import;
+  $: failedSteps = Object.entries(result?.steps ?? {}).filter(([, st]) => !st.ok);
+  const STEP_LABEL = { remember_account: 'Remembering the account', hold_duplicates: 'Holding possible duplicates',
+    learn_rules: 'Saving category rules', scan: 'Scanning for duplicates and transfers', reconcile: 'Reconciling', history: 'Import history' };
 
   function setAll(v) { verifications = Object.fromEntries(toVerify.map((t) => [t.imported_id, v])); }
 </script>
@@ -79,8 +84,8 @@
   <h1>Ready to import</h1>
 
   <div class="tiles">
-    <div class="tile"><span class="t-label">New</span><span class="t-value">{previewing ? '…' : preview?.added ?? count}</span><span class="t-sub">will be added</span></div>
-    <div class="tile"><span class="t-label">Already in Actual</span><span class="t-value">{previewing ? '…' : preview?.skipped ?? '—'}</span><span class="t-sub">skipped as duplicates</span></div>
+    <div class="tile"><span class="t-label">New</span><span class="t-value">{previewing ? '…' : preview?.new ?? count}</span><span class="t-sub">will be added</span></div>
+    <div class="tile"><span class="t-label">Already in Actual</span><span class="t-value">{previewing ? '…' : preview?.already_imported ?? '—'}</span><span class="t-sub">skipped as duplicates</span></div>
     <div class="tile" class:warn={toVerify.length}><span class="t-label">Possible duplicates</span><span class="t-value">{previewing ? '…' : toVerify.length}</span><span class="t-sub">{toVerify.length ? 'decide below' : 'nothing to decide'}</span></div>
     <div class="tile"><span class="t-label">Uncategorised</span><span class="t-value">{uncategorised}</span><span class="t-sub">fixable later in Actual</span></div>
   </div>
@@ -111,8 +116,8 @@
 
   <div class="foot">
     <button class="ghost lg" on:click={() => dispatch('back')}>Back</button>
-    <button class="primary lg" on:click={doImport} disabled={importing || previewing || !accountId || unresolved.length > 0 || (preview && preview.added === 0 && !toVerify.length)}>
-      {#if importing}Importing…{:else if unresolved.length}Decide {unresolved.length} duplicate{unresolved.length > 1 ? 's' : ''} first{:else if preview && preview.added === 0 && !toVerify.length}Nothing new to import{:else}Import {preview?.added ?? count} into {accountName}{/if}
+    <button class="primary lg" on:click={doImport} disabled={importing || previewing || !accountId || unresolved.length > 0 || (preview && preview.new === 0 && !toVerify.length)}>
+      {#if importing}Importing…{:else if unresolved.length}Decide {unresolved.length} duplicate{unresolved.length > 1 ? 's' : ''} first{:else if preview && preview.new === 0 && !toVerify.length}Nothing new to import{:else}Import {preview?.new ?? count} into {accountName}{/if}
     </button>
   </div>
 {:else}
@@ -120,16 +125,19 @@
   <div class="banner ok">
     <span class="b-icon"><Icon name="check" size={22} stroke={2.5} /></span>
     <div class="ok-body">
-      <div class="ok-title">{result.added} transaction{result.added === 1 ? '' : 's'} added to {accountName}</div>
+      <div class="ok-title">{imported.added} transaction{imported.added === 1 ? '' : 's'} added to {accountName}</div>
       <div class="muted">
-        {#if result.skipped}{result.skipped} skipped as duplicates. {/if}{#if result.updated}{result.updated} existing rows updated. {/if}{#if rulesCreated}{rulesCreated} category rule{rulesCreated === 1 ? '' : 's'} saved, so those payees are categorised automatically next time. {/if}Next, check that Actual's balance matches the bank.
+        {#if imported.skipped}{imported.skipped} skipped as duplicates. {/if}{#if imported.updated}{imported.updated} existing rows updated. {/if}{#if rulesCreated}{rulesCreated} category rule{rulesCreated === 1 ? '' : 's'} saved, so those payees are categorised automatically next time. {/if}Next, check that Actual's balance matches the bank.
       </div>
       {#if scanNote}<div class="muted">{scanNote} — <button class="linkish" on:click={() => dispatch('openReview')}>review</button></div>{/if}
     </div>
-    {#if result.addedIds?.length}
+    {#if imported.addedIds?.length}
       <button class="ghost sm" on:click={undo} disabled={undoing}><Icon name="undo" size={16} /> {undoing ? 'Undoing…' : 'Undo import'}</button>
     {/if}
   </div>
+  {#each failedSteps as [name, st]}
+    <div class="banner warn">{STEP_LABEL[name] ?? name} didn't finish: {st.error}</div>
+  {/each}
   {#if error}<div class="banner error">{error}</div>{/if}
   <div class="foot">
     <button class="ghost lg" on:click={() => dispatch('new')}>Import another statement</button>
