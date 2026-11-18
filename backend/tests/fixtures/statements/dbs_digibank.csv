@@ -1,0 +1,11 @@
+"Account Details For:","savings 120-00000-1",,,,,,,
+"Statement as at:","31 Dec 2026",,,,,,,
+"",,,,,,,,
+"Transaction Date","Transaction Code","Description","Transaction Ref1","Transaction Ref2","Transaction Ref3","Status","Debit Amount","Credit Amount"
+"02 Dec 2026","IBG","GIRO SALARY EXAMPLE CO PTE LTD","EXAMPLE CO PTE LTD","SALARY DEC","IBG0001","Settled","","4,200.00"
+"04 Dec 2026","ITR","Funds Transfer TO: ALEX EXAMPLE","Funds Transfer","TO: ALEX EXAMPLE","OTHR","Settled",35,""
+"06 Dec 2026","BILL","Bill Payment IB: EXAMPLE TELCO","Bill Payment","IB: EXAMPLE TELCO","0004","Posted",48.15,""
+"08 Dec 2026","UMC","EXAMPLE CAFE SINGAPORE SGP 07DEC 4628-0000","EXAMPLE CAFE SINGAPORE SGP 07DEC","4628-0000","0005","Settled",6.8,""
+"15 Dec 2026","SC","Fall Below Fee","","","","Settled",2,""
+"20 Dec 2026","MST","EXAMPLE PENDING SHOP 19DEC","EXAMPLE PENDING SHOP 19DEC","4628-0000","0006","Pending",9.9,""
+"21 Dec 2026","ADV","Advice","","","","Settled","",""

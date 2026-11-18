@@ -1,0 +1,92 @@
+{
+  "bank": "UOB",
+  "info": {
+    "bank": "UOB",
+    "kind": "credit_card",
+    "account_type": "",
+    "last4": "4321",
+    "period_start": "2026-12-27",
+    "period_end": "2027-01-04",
+    "balance": null,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-27",
+      "description": "EXAMPLE BOOKSHOP SINGAPORE",
+      "merchant": null,
+      "match_text": null,
+      "amount": 45.9,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "74000000000000000000001",
+      "imported_id": "ref-74000000000000000000001",
+      "legacy_ids": [
+        "3e5afa1a390f3c56"
+      ]
+    },
+    {
+      "date": "2026-12-31",
+      "description": "STREAMCO.COM AMSTERDAM NL",
+      "merchant": null,
+      "match_text": null,
+      "amount": 19.38,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": 14.99,
+      "foreign_currency": "USD",
+      "ref": "74000000000000000000002",
+      "imported_id": "ref-74000000000000000000002",
+      "legacy_ids": [
+        "dd2c6daa2a80ab68"
+      ]
+    },
+    {
+      "date": "2027-01-02",
+      "description": "PAYMT THRU E-BANK/HOMEB/CYBERB (EP52)",
+      "merchant": null,
+      "match_text": null,
+      "amount": 1234.56,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "a2674e09fa576378",
+      "legacy_ids": []
+    },
+    {
+      "date": "2027-01-03",
+      "description": "BUS/MRT 846451010 SINGAPORE",
+      "merchant": null,
+      "match_text": null,
+      "amount": 2.36,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "74000000000000000000003",
+      "imported_id": "ref-74000000000000000000003",
+      "legacy_ids": [
+        "8d0dabbc54447842"
+      ]
+    },
+    {
+      "date": "2027-01-04",
+      "description": "CASHBACK REBATE",
+      "merchant": null,
+      "match_text": null,
+      "amount": 5.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "c8cd6435d64f20e3",
+      "legacy_ids": []
+    }
+  ]
+}

@@ -1,0 +1,142 @@
+{
+  "bank": "UOB",
+  "info": {
+    "bank": "UOB",
+    "kind": "deposit",
+    "account_type": "One Account",
+    "last4": "5678",
+    "period_start": "2026-12-01",
+    "period_end": "2026-12-31",
+    "balance": 5289.67,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-02",
+      "description": "PAYNOW-FAST OTHR Transfer - Mobile PIB2612020000000011 ALEX EXAMPLE",
+      "merchant": "ALEX EXAMPLE",
+      "match_text": "PAYNOW ALEX EXAMPLE",
+      "amount": 25.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "PIB2612020000000011",
+      "imported_id": "ref-PIB2612020000000011",
+      "legacy_ids": [
+        "fd782609858082f2"
+      ],
+      "running_balance": 4975.0
+    },
+    {
+      "date": "2026-12-03",
+      "description": "PAYNOW-FAST OTHR dinner PIB2612030000000012 EXAMPLE FOODS PTE LTD",
+      "merchant": "EXAMPLE FOODS PTE LTD",
+      "match_text": "EXAMPLE FOODS PTE LTD dinner",
+      "amount": 18.4,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "PIB2612030000000012",
+      "imported_id": "ref-PIB2612030000000012",
+      "legacy_ids": [
+        "7b6ee0e9574b0a2f"
+      ],
+      "running_balance": 4956.6
+    },
+    {
+      "date": "2026-12-05",
+      "description": "PAYNOW-FAST MX EXAMPLE BAKERY MBK2612050000000013",
+      "merchant": "EXAMPLE BAKERY",
+      "match_text": "EXAMPLE BAKERY",
+      "amount": 6.2,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "MBK2612050000000013",
+      "imported_id": "ref-MBK2612050000000013",
+      "legacy_ids": [
+        "6c593f6929368ada"
+      ],
+      "running_balance": 4950.4
+    },
+    {
+      "date": "2026-12-07",
+      "description": "NETS Debit-Consumer EXAMPLE MART123456789 xxxxxx4421",
+      "merchant": "EXAMPLE MART",
+      "match_text": "EXAMPLE MART",
+      "amount": 32.15,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "67020bc34ba33bc9",
+      "legacy_ids": [],
+      "running_balance": 4918.25
+    },
+    {
+      "date": "2026-12-09",
+      "description": "Misc DR-Debit Card MTY-FAVEPAY EXAMPLE CAFE 09 DEC 7250 0025994",
+      "merchant": "EXAMPLE CAFE",
+      "match_text": "EXAMPLE CAFE",
+      "amount": 9.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "aef65d2c02e2e2a9",
+      "legacy_ids": [],
+      "running_balance": 4909.25
+    },
+    {
+      "date": "2026-12-15",
+      "description": "Inward Credit-FAST Transfer OTHR Other JANE EXAMPLE",
+      "merchant": "JANE EXAMPLE",
+      "match_text": "JANE EXAMPLE",
+      "amount": 500.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "3db59d1d47df6430",
+      "legacy_ids": [],
+      "running_balance": 5409.25
+    },
+    {
+      "date": "2026-12-20",
+      "description": "Bill Payment Bill payment mBK-UCF 8028300107",
+      "merchant": "UCF",
+      "match_text": "UCF",
+      "amount": 120.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "de03f5c786b9fd4f",
+      "legacy_ids": [],
+      "running_balance": 5289.25
+    },
+    {
+      "date": "2026-12-31",
+      "description": "Interest Credit",
+      "merchant": null,
+      "match_text": null,
+      "amount": 0.42,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "c02170ee37263e64",
+      "legacy_ids": [],
+      "running_balance": 5289.67
+    }
+  ]
+}

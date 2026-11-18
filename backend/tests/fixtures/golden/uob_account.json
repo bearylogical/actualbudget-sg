@@ -1,0 +1,74 @@
+{
+  "bank": "UOB",
+  "info": {
+    "bank": "UOB",
+    "kind": "deposit",
+    "account_type": "",
+    "last4": "5678",
+    "period_start": "2026-12-02",
+    "period_end": "2026-12-31",
+    "balance": null,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-02",
+      "description": "PAYNOW-FAST - EXAMPLE PAY PTE. LTD.",
+      "merchant": null,
+      "match_text": null,
+      "amount": 2.4,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "PIB2612020000000001",
+      "imported_id": "ref-PIB2612020000000001",
+      "legacy_ids": [
+        "849a868c4ed15b48"
+      ]
+    },
+    {
+      "date": "2026-12-15",
+      "description": "Inward Credit-FAST - Transfer OTHR Other - JANE EXAMPLE",
+      "merchant": null,
+      "match_text": null,
+      "amount": 3500.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "8b8d061c72845de2",
+      "legacy_ids": []
+    },
+    {
+      "date": "2026-12-20",
+      "description": "NETS Debit-Consumer - KOPI CORNER 123456789",
+      "merchant": null,
+      "match_text": null,
+      "amount": 12.5,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "9e419dc1a402f174",
+      "legacy_ids": []
+    },
+    {
+      "date": "2026-12-31",
+      "description": "Interest Credit",
+      "merchant": null,
+      "match_text": null,
+      "amount": 0.35,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "a1409a23b6dab39c",
+      "legacy_ids": []
+    }
+  ]
+}

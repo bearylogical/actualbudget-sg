@@ -1,0 +1,100 @@
+{
+  "bank": "DBS/POSB",
+  "info": {
+    "bank": "DBS/POSB",
+    "kind": "deposit",
+    "account_type": "savings",
+    "last4": "0001",
+    "period_start": "2026-12-02",
+    "period_end": "2026-12-31",
+    "balance": null,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-02",
+      "description": "GIRO SALARY EXAMPLE CO PTE LTD",
+      "merchant": "EXAMPLE CO PTE LTD",
+      "match_text": null,
+      "amount": 4200.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "4e0b79cfca04f7d5fc0c",
+      "imported_id": "ref-4e0b79cfca04f7d5fc0c",
+      "legacy_ids": [
+        "ref-EXAMPLE CO PTE LTD",
+        "093e871008fd6a28"
+      ]
+    },
+    {
+      "date": "2026-12-04",
+      "description": "Funds Transfer TO: ALEX EXAMPLE",
+      "merchant": "ALEX EXAMPLE",
+      "match_text": null,
+      "amount": 35.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "69ccdc038bacc1e506bc",
+      "imported_id": "ref-69ccdc038bacc1e506bc",
+      "legacy_ids": [
+        "ref-Funds Transfer",
+        "71c17f87cb46a8c4"
+      ]
+    },
+    {
+      "date": "2026-12-06",
+      "description": "Bill Payment IB: EXAMPLE TELCO",
+      "merchant": "EXAMPLE TELCO",
+      "match_text": null,
+      "amount": 48.15,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "8f051a5d1d7e3650e987",
+      "imported_id": "ref-8f051a5d1d7e3650e987",
+      "legacy_ids": [
+        "ref-Bill Payment",
+        "59ef997e3f213cdd"
+      ]
+    },
+    {
+      "date": "2026-12-08",
+      "description": "EXAMPLE CAFE SINGAPORE SGP 07DEC 4628-0000",
+      "merchant": "EXAMPLE CAFE SINGAPORE SGP",
+      "match_text": null,
+      "amount": 6.8,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "e4d612513ce128e5c82a",
+      "imported_id": "ref-e4d612513ce128e5c82a",
+      "legacy_ids": [
+        "ref-EXAMPLE CAFE SINGAPORE SGP 07DEC",
+        "cf2a4c80a00e569a"
+      ]
+    },
+    {
+      "date": "2026-12-15",
+      "description": "SERVICE CHARGE Fall Below Fee",
+      "merchant": null,
+      "match_text": null,
+      "amount": 2.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "b5272482074bdc16",
+      "legacy_ids": [
+        "5295753584800b0a"
+      ]
+    }
+  ]
+}

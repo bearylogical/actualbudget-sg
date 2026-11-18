@@ -1,0 +1,11 @@
+"OCBC 360 Account","601-000000-001"
+"Available Balance","1,000.00"
+""
+"Transaction History"
+"Date","Description","Withdrawals (SGD)","Deposits (SGD)","Reference"
+"01/12/2026","NETS QR EXAMPLE HAWKER","4.50","","REF0001"
+"03/12/2026","GIRO - EXAMPLE UTILITIES
+ACCT 12345","1,200.00","","REF0002"
+"05/12/2026","FAST PAYMENT FROM SAM EXAMPLE","","80.00",""
+"07/12/2026","SHOULD BE SKIPPED - NO AMOUNT","","",""
+"","","","",""

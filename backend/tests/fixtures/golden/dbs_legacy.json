@@ -1,0 +1,78 @@
+{
+  "bank": "DBS/POSB",
+  "info": {
+    "bank": "DBS/POSB",
+    "kind": "deposit",
+    "account_type": "DBS Multiplier Account",
+    "last4": "0009",
+    "period_start": "2026-12-03",
+    "period_end": "2026-12-31",
+    "balance": 2345.67,
+    "balance_is_owed": false,
+    "skipped_pending": 0
+  },
+  "transactions": [
+    {
+      "date": "2026-12-03",
+      "description": "POS",
+      "merchant": null,
+      "match_text": null,
+      "amount": 12.3,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "EXAMPLE MART SINGAPORE",
+      "imported_id": "ref-EXAMPLE MART SINGAPORE",
+      "legacy_ids": [
+        "dc8fcd7e264a29b7"
+      ]
+    },
+    {
+      "date": "2026-12-05",
+      "description": "ICT",
+      "merchant": null,
+      "match_text": null,
+      "amount": 250.0,
+      "currency": "SGD",
+      "is_credit": true,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "FROM: JOHN EXAMPLE",
+      "imported_id": "ref-FROM: JOHN EXAMPLE",
+      "legacy_ids": [
+        "091967180f9795d3"
+      ]
+    },
+    {
+      "date": "2026-12-08",
+      "description": "ADV",
+      "merchant": null,
+      "match_text": null,
+      "amount": 8.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": null,
+      "imported_id": "351f53b25110247c",
+      "legacy_ids": []
+    },
+    {
+      "date": "2026-12-10",
+      "description": "GIRO",
+      "merchant": null,
+      "match_text": null,
+      "amount": 1250.0,
+      "currency": "SGD",
+      "is_credit": false,
+      "foreign_amount": null,
+      "foreign_currency": null,
+      "ref": "EXAMPLE TOWN COUNCIL",
+      "imported_id": "ref-EXAMPLE TOWN COUNCIL",
+      "legacy_ids": [
+        "29b5d89258cc3344"
+      ]
+    }
+  ]
+}

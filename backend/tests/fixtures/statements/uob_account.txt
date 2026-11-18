@@ -1,0 +1,23 @@
+United Overseas Bank Limited  Co. Reg. No. 193500026Z
+Statement of Account
+One Account
+Account No: 901-234-567-8
+Period: 01 Dec 2026 to 31 Dec 2026
+
+Date      Description                        Withdrawals      Deposits       Balance
+01 Dec    BALANCE B/F                                                       5,000.00
+02 Dec    PAYNOW-FAST                               2.40                    4,997.60
+              PIB2612020000000001
+              EXAMPLE PAY PTE. LTD.
+15 Dec    Inward Credit-FAST                                  3,500.00      8,497.60
+              Transfer OTHR Other
+              JANE EXAMPLE
+
+Date      Description                        Withdrawals      Deposits       Balance
+20 Dec    NETS Debit-Consumer                      12.50                    8,485.10
+              KOPI CORNER 123456789
+              xxxxxx4421
+31 Dec    Interest Credit                                         0.35      8,485.45
+          Total                                    14.90      3,500.35
+------------------------ End of Transaction Details ------------------------
+31 Dec    NOT A TRANSACTION                        99.99                        0.00
