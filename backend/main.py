@@ -6,10 +6,9 @@ import pandas as pd
 import io
 import os
 import httpx
-from parsers import parse_statement as parse_statement_bytes, SUPPORTED_EXTENSIONS
+from parsers import SUPPORTED_EXTENSIONS
 import accounts as acct
 from actual_rules import ActualContext
-from pipeline import enrich
 import history
 from llm import LLMCategorizer
 from rules_audit import audit, to_markdown
@@ -18,6 +17,9 @@ import health
 import connection
 import import_log
 import bridge_client
+import review_scan
+import statement_import as si
+from reconcile import run as recon_run
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -68,103 +70,71 @@ async def health_full(llm: str = "", strict: bool = False):
     return JSONResponse(report, status_code=code)
 
 
-@app.post("/parse")
-async def parse_statement(
-    file: UploadFile = File(...), account_id: str = "", use_llm: bool = True
-):
+# ── Statement import (statement_import.py) ───────────────────────────────────
+
+def _import_error(e: Exception):
+    if isinstance(e, si.StatementImportError):
+        raise HTTPException(e.status, str(e))
+    if isinstance(e, bridge_client.BridgeError):
+        raise HTTPException(502, str(e))
+    raise e
+
+
+@app.post("/imports")
+async def imports_open(file: UploadFile = File(...), use_llm: bool = True):
+    """Upload a statement → an Import session and its first preview."""
     name = (file.filename or "").lower()
     if not name.endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(400, f"Supported files: {', '.join(SUPPORTED_EXTENSIONS)}")
     content = await file.read()
-    upload_id = await run_in_threadpool(import_log.start, "ui", file.filename or "statement", content)
     try:
-        transactions, bank, info = await run_in_threadpool(
-            parse_statement_bytes, content, file.filename or ""
-        )
+        sid = await run_in_threadpool(si.open_session, "ui", file.filename or "statement", content)
+        return await run_in_threadpool(lambda: si.preview(sid, use_llm=use_llm))
     except Exception as e:
-        await run_in_threadpool(import_log.fail, upload_id, "parse", e)
-        raise HTTPException(422, f"Could not parse statement: {e}")
-    await run_in_threadpool(import_log.set_statement, upload_id, info, len(transactions))
-    ctx = await get_context()
-    account = await recommend_account(info, transactions) if ctx else _no_recommendation(info)
-    # an explicit choice wins; otherwise use a confident recommendation so account-scoped
-    # Actual rules are previewed correctly
-    use_account = account_id or (account["recommended"] if account.get("auto_select") else None)
-    hist = await run_in_threadpool(history.get, ctx)
-    result = await run_in_threadpool(
-        enrich, transactions, ctx, account_id=use_account, use_llm=use_llm, history=hist
-    )
-    return {
-        **result,
-        "count": len(result["transactions"]),
-        "bank": bank,
-        "statement": info.to_dict(),
-        "account": account,
-        "actual_connected": ctx is not None,
-        "upload_id": upload_id,
-        # the exact same file (SHA-256) seen before — imported, undone or abandoned
-        "seen_before": import_log.seen_before(import_log.sha256(content), exclude=upload_id),
-    }
+        _import_error(e)
 
 
-def _no_recommendation(info) -> dict:
-    return {"statement": info.to_dict(), "suggestions": [], "recommended": None,
-            "auto_select": False, "remembered": acct.load_map().get(info.fingerprint, {}).get("account_id")}
-
-
-async def recommend_account(info, transactions: list[dict]) -> dict:
-    """Rank Actual accounts for this statement (see accounts.py)."""
+@app.post("/imports/{sid}/preview")
+async def imports_preview(sid: str, body: dict | None = None):
+    """{account_id?, use_llm?, refresh?, categories?, exclude?} → what committing would do."""
+    b = body or {}
     try:
-        data = await _bridge("POST", "/accounts/match", acct.match_request(transactions), timeout=90)
-    except HTTPException:
-        return _no_recommendation(info)
-    rows = data.get("accounts", [])
-    return acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
+        return await run_in_threadpool(lambda: si.preview(
+            sid, b.get("account_id") or None, use_llm=b.get("use_llm", True), refresh=bool(b.get("refresh")),
+            categories=b.get("categories"), exclude=b.get("exclude")))
+    except Exception as e:
+        _import_error(e)
 
 
-@app.post("/accounts/recommend")
-async def accounts_recommend(body: dict):
-    """Re-rank after connecting to Actual: {statement, transactions}."""
-    info = acct.StatementInfo.from_dict(body.get("statement"))
-    if await get_context() is None:
-        return _no_recommendation(info)
-    return await recommend_account(info, body.get("transactions") or [])
+@app.post("/imports/{sid}/commit")
+async def imports_commit(sid: str, body: dict):
+    """{account_id, categories?, include_verified?, exclude?, override_account_guard?, learn_rules?,
+    use_llm?, reconcile_use_llm?} → the import result and each step after it."""
+    try:
+        return await run_in_threadpool(lambda: si.commit(
+            sid, body.get("account_id") or "", categories=body.get("categories"),
+            include_verified=body.get("include_verified"), exclude=body.get("exclude"),
+            override_account_guard=bool(body.get("override_account_guard")),
+            learn_rules=body.get("learn_rules", True), use_llm=body.get("use_llm", True),
+            reconcile_use_llm=body.get("reconcile_use_llm")))
+    except Exception as e:
+        _import_error(e)
 
 
-@app.post("/accounts/remember")
-async def accounts_remember(body: dict):
-    """After a successful import: {fingerprint, account_id, account_name}."""
-    if not body.get("fingerprint") or not body.get("account_id"):
-        raise HTTPException(400, "fingerprint and account_id required")
-    return {"map": acct.remember(body["fingerprint"], body["account_id"], body.get("account_name", ""))}
-
-
-@app.get("/accounts/map")
-async def accounts_map():
-    return {"map": acct.load_map()}
-
-
-@app.post("/accounts/forget")
-async def accounts_forget(body: dict):
-    return {"map": acct.forget(body.get("fingerprint", ""))}
-
-
-@app.post("/categorize")
-async def categorize_transactions(body: dict):
-    """Re-run categorisation, e.g. after connecting to Actual or changing aliases.
-    {refresh: true} rebuilds your category history from Actual first (the Refresh button)."""
-    ctx = await get_context()
-    hist = await run_in_threadpool(history.get, ctx, bool(body.get("refresh")))
-    result = await run_in_threadpool(
-        enrich,
-        body.get("transactions", []),
-        ctx,
-        account_id=body.get("account_id") or None,
-        use_llm=body.get("use_llm", True),
-        history=hist,
-    )
-    return {**result, "actual_connected": ctx is not None,
-            "history_size": len(hist) if hist is not None else 0}
+@app.post("/imports/{sid}/reconcile")
+async def imports_reconcile(sid: str, body: dict | None = None):
+    """{balance?, statement_date?, use_llm?} → reconcile report + queued fixes."""
+    b = body or {}
+    if b.get("statement_date"):
+        try:
+            _date.fromisoformat(b["statement_date"])
+        except ValueError:
+            raise HTTPException(400, "statement_date must be YYYY-MM-DD")
+    try:
+        return await run_in_threadpool(lambda: si.reconcile(
+            sid, b.get("balance"), statement_date=b.get("statement_date") or None, use_llm=b.get("use_llm", True)))
+    except Exception as e:
+        _import_error(e)
 
 
 @app.get("/taxonomy")
@@ -399,37 +369,6 @@ async def actual_budget_month(month: str):
     return await _bridge("GET", f"/budget-month/{month}")
 
 
-@app.post("/actual/import")
-async def actual_import(body: dict):
-    """Forward to the bridge. uploadId / accountName (from /parse) record the result in the history."""
-    upload_id = body.pop("uploadId", None)
-    account_name = body.pop("accountName", "")
-    dry = bool(body.get("dryRun"))
-    try:
-        data = await _bridge("POST", "/import", body, timeout=60)
-    except HTTPException as e:
-        if upload_id and not dry:
-            await run_in_threadpool(import_log.fail, upload_id, "import", e.detail)
-        raise
-    if upload_id and not dry:
-        await run_in_threadpool(import_log.record_result, upload_id, data, body.get("accountId", ""),
-                                account_name, "chosen in the web UI")
-    return data
-
-
-@app.post("/actual/undo-import")
-async def actual_undo_import(body: dict):
-    """Delete the rows an import just added (ids from its addedIds). Actual keeps deleted
-    imported_ids per account, so re-importing the same file into this account skips them."""
-    ids = [i for i in (body.get("ids") or []) if isinstance(i, str)]
-    if not ids:
-        raise HTTPException(400, "ids required")
-    data = await _bridge("POST", "/txns/delete", {"ids": ids}, timeout=60)
-    if body.get("uploadId"):
-        await run_in_threadpool(import_log.update, body["uploadId"], status="undone")
-    return data
-
-
 @app.post("/actual/reset")
 async def actual_reset():
     """Disconnect: also forget the saved connection, so the scheduler stops importing."""
@@ -442,59 +381,11 @@ async def actual_reset():
 
 # ── Review queue (duplicates / transfers / reconciliation fixes) ─────────────
 import review
-import reconcile
 from datetime import date as _date, timedelta as _td
 
 
-def _account_last4() -> dict[str, str]:
-    """account_id → last 4 digits, from remembered statement fingerprints."""
-    out = {}
-    for fp, v in acct.load_map().items():
-        last4 = fp.rsplit("|", 1)[-1]
-        if last4 and last4 != "?":
-            out[v["account_id"]] = last4
-    return out
-
-
-def _apply(item: dict) -> dict:
-    try:
-        actions = bridge_client.actions_for(item)
-        result = bridge_client.apply_actions(actions) if actions else {"ok": True, "results": [], "errors": []}
-        review.mark_done(item["id"], result, ok=result["ok"])
-        if result["ok"]:
-            result["superseded"] = review.supersede(bridge_client.touched_ids(actions), except_id=item["id"])
-    except Exception as e:
-        result = {"ok": False, "errors": [str(e)]}
-        review.mark_done(item["id"], result, ok=False)
-    return {**review.get(item["id"]), "applied": result}
-
-
-def scan_and_queue(start: str, end: str, account_ids: list[str] | None = None) -> dict:
-    """Find duplicates + unlinked transfers in Actual and queue them. Learned items apply themselves."""
-    rows, _ = bridge_client.txns(start, end)
-    if account_ids:
-        dup_rows = [t for t in rows if t["account"] in account_ids]
-    else:
-        dup_rows = rows
-    queued, auto = [], []
-    dups = review.find_existing_duplicates(dup_rows)
-    for d in review.find_cross_account_duplicates(rows):
-        if not account_ids or {d["a"]["account"], d["b"]["account"]} & set(account_ids):
-            dups.append(d)
-    for d in dups:
-        it = review.enqueue("existing_duplicate", {**d, "account": d["a"]["account"]}, [d["a"]["id"], d["b"]["id"]])
-        (auto if it["status"] == "auto" else queued).append(it)
-    for p in review.find_transfer_pairs(rows, _account_last4()):
-        if account_ids and not ({p["a"]["account"], p["b"]["account"]} & set(account_ids)):
-            continue
-        it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
-        (auto if it["status"] == "auto" else queued).append(it)
-    applied = [_apply(it) for it in auto if it.get("decision")]
-    pending = [q for q in queued if q["status"] == "pending"]
-    return {"queued": len(pending), "auto_applied": len(applied),
-            "duplicates": sum(q["kind"] == "existing_duplicate" for q in pending),
-            "transfers": sum(q["kind"] == "transfer_pair" for q in pending),
-            "items": queued + applied}
+_apply = review_scan.apply_item
+scan_and_queue = review_scan.scan_and_queue
 
 
 def recategorize_scan(start: str, end: str, mode: str = "uncategorised", use_llm: bool = True,
@@ -573,8 +464,6 @@ async def review_scan(body: dict | None = None):
         res = await run_in_threadpool(scan_and_queue, start, end, body.get("account_ids"))
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
-    if body.get("uploadId"):
-        await run_in_threadpool(import_log.add_review_ids, body["uploadId"], [i["id"] for i in res["items"]])
     return res
 
 
@@ -733,29 +622,6 @@ async def review_forget(body: dict):
 
 # ── Reconciliation ───────────────────────────────────────────────────────────
 
-def run_reconcile(account_id: str, info, statement_rows: list[dict], balance: float | None = None,
-                  as_of: str | None = None, use_llm: bool = True, statement_date: str | None = None) -> dict:
-    as_of = as_of or info.period_end or max((t["date"] for t in statement_rows), default=_date.today().isoformat())
-    start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
-    rows, accts = bridge_client.txns(reconcile.EPOCH, as_of, [account_id])
-    others, _ = bridge_client.txns(start, as_of)
-    others = [t for t in others if t["account"] != account_id]
-    name = next((a["name"] for a in accts if a["id"] == account_id), account_id)
-    if statement_date:      # cards keep a fixed statement day — remember it for next time
-        reconcile.remember_cycle_day(account_id, statement_date)
-    report = reconcile.analyse(account_id, info, statement_rows, rows, balance, as_of, name, others,
-                               statement_date=statement_date, cycle_day=reconcile.cycle_day(account_id))
-    llm = LLMCategorizer()
-    if use_llm and llm.enabled and not report["reconciled"]:
-        try:
-            ag = reconcile.agent(report, statement_rows, llm)
-            return {"report": report, "explanation": ag["explanation"], "tool_calls": ag["tool_calls"],
-                    "queued": ag["queued"], "engine": "llm"}
-        except Exception as e:   # fall back to the deterministic plan
-            report["llm_error"] = str(e)[:300]
-    return {"report": report, "explanation": None, "queued": reconcile.queue(report), "engine": "rules"}
-
-
 @app.post("/reconcile")
 async def reconcile_account(body: dict):
     """{account_id, statement?, transactions?, balance?, as_of?, use_llm?, statement_date?} → report + queued fixes.
@@ -769,19 +635,12 @@ async def reconcile_account(body: dict):
             raise HTTPException(400, "statement_date must be YYYY-MM-DD")
     info = acct.StatementInfo.from_dict(body.get("statement"))
     try:
-        res = await run_in_threadpool(run_reconcile, body["account_id"], info, body.get("transactions") or [],
+        res = await run_in_threadpool(recon_run, body["account_id"], info, body.get("transactions") or [],
                                       body.get("balance"), body.get("as_of"), body.get("use_llm", True),
                                       body.get("statement_date") or None)
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
-    if body.get("uploadId"):
-        await run_in_threadpool(_log_reconcile, body["uploadId"], res)
     return res
-
-
-def _log_reconcile(upload_id: str, res: dict):
-    import_log.update(upload_id, reconcile=import_log.reconcile_summary(res["report"], res.get("queued") or []))
-    import_log.add_review_ids(upload_id, [q["id"] for q in res.get("queued") or [] if q.get("id")])
 
 
 # ── Import history ───────────────────────────────────────────────────────────
@@ -799,6 +658,8 @@ async def imports_get(iid: str):
     r = await run_in_threadpool(import_log.get, iid)
     if not r:
         raise HTTPException(404, "No such import")
+    for c in import_log.SESSION_COLS:     # session state, not history
+        r.pop(c, None)
     if r["review_ids"]:
         statuses = await run_in_threadpool(review.statuses, r["review_ids"])
         r["review"] = statuses
@@ -816,16 +677,11 @@ async def imports_file(iid: str):
 
 @app.post("/imports/{iid}/undo")
 async def imports_undo(iid: str):
-    """Delete the rows this import added. Actual remembers deleted imported_ids per account,
-    so re-importing the same file into that account won't bring them back silently."""
-    r = await run_in_threadpool(import_log.get, iid)
-    if not r:
-        raise HTTPException(404, "No such import")
-    if r["status"] != "imported" or not r["added_ids"]:
-        raise HTTPException(409, "Only an import that added rows, and hasn't been undone, can be undone")
-    data = await _bridge("POST", "/txns/delete", {"ids": r["added_ids"]}, timeout=60)
-    await run_in_threadpool(import_log.update, iid, status="undone")
-    return {**data, "import": await run_in_threadpool(import_log.get, iid)}
+    """Delete the rows this import added (see statement_import.undo)."""
+    try:
+        return await run_in_threadpool(si.undo, iid)
+    except Exception as e:
+        _import_error(e)
 
 
 # ── Money dashboard (Actual + Ghostfolio) ────────────────────────────────────

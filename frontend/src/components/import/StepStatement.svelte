@@ -7,7 +7,7 @@
   import { createEventDispatcher } from 'svelte';
   import Icon from '../Icon.svelte';
 
-  export let statement = null;     // StatementInfo from /parse
+  export let statement = null;     // StatementInfo from the Import session
   export let rec = null;           // { suggestions, recommended, auto_select, remembered }
   export let accounts = [];        // Actual accounts (balance in cents)
   export let selectedId = '';
@@ -18,6 +18,7 @@
   export let locked = false;       // already imported: the account can't change without an undo
   export let blocked = true;       // out: can't continue
   export let seenBefore = [];      // earlier imports of this exact file (import history)
+  export let guard = null;         // the server's wrong-account guard for selectedId (a reason, or null)
 
   const dispatch = createEventDispatcher();
   let dragover = false;
@@ -42,8 +43,9 @@
   $: selectedName = byId.get(selectedId)?.name ?? '';
   $: recName = suggestions.find(s => s.account_id === recommended)?.name ?? byId.get(recommended)?.name ?? '';
   $: mismatch = !!(rec?.auto_select && recommended && selectedId && selectedId !== recommended);
-  $: holder = suggestions.find(s => s.account_id !== selectedId && (s.matched || 0) >= Math.max(3, 0.2 * total));
-  $: conflict = !!(selectedId && holder && !(selected?.matched));
+  // which account already holds these rows (for the "Switch to" button); the block itself is the server's guard
+  $: holder = suggestions.filter(s => s.account_id !== selectedId).sort((a, b) => (b.matched || 0) - (a.matched || 0))[0];
+  $: conflict = !!(selectedId && guard && holder);
   $: if (!mismatch) override = false;
   $: blocked = !statement || !selectedId || conflict || (mismatch && !override);
 
@@ -133,7 +135,7 @@
     <div class="banner warn" role="alert">
       <span class="b-icon"><Icon name="alert" size={20} /></span>
       <div class="b-body">
-        <div><strong>{holder.matched} of these {total} transactions are already in {holder.name}.</strong> Importing into {selectedName} would duplicate them.</div>
+        <div><strong>{guard}</strong></div>
         <div><button class="primary sm" on:click={() => pick(holder.account_id)}>Switch to {holder.name}</button></div>
       </div>
     </div>

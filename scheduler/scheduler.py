@@ -8,6 +8,9 @@ Account routing — each bank's file must land in its own Actual account:
 Keys are matched (case-insensitive substring) against the detected bank
 ("UOB", "DBS/POSB", "OCBC") and then the file name. Values may be an Actual
 account name or id. ACTUAL_ACCOUNT_ID is the fallback when nothing matches.
+
+Each file is a Watch-folder import: the same Statement import module as the web UI
+(statement_import.py), committed with no decisions.
 """
 import json
 import logging
@@ -16,18 +19,10 @@ import shutil
 import time
 from pathlib import Path
 
-import requests
-
-from actual_rules import ActualContext
-from parsers import parse_statement, SUPPORTED_EXTENSIONS
-import accounts as acct
-from pipeline import enrich
-import history
+from parsers import SUPPORTED_EXTENSIONS
+import connection
 import review
-import reconcile
-import bridge_client
-import import_log
-from llm import LLMCategorizer
+import statement_import as si
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("scheduler")
@@ -36,8 +31,6 @@ WATCH_DIR   = Path(os.getenv("WATCH_DIR", "/watch"))
 DONE_DIR    = Path(os.getenv("DONE_DIR", "/watch/done"))
 ERROR_DIR   = Path(os.getenv("ERROR_DIR", "/watch/error"))
 POLL_SECS   = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
-BRIDGE_URL  = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
-CONFIG_FILE = Path(os.getenv("CONFIG_FILE", "/data/scheduler-config.json"))
 HEARTBEAT   = Path(os.getenv("DATA_DIR", "/data")) / "scheduler-heartbeat.json"
 
 # last-run state, published in the heartbeat for the backend's /health
@@ -61,196 +54,19 @@ def write_heartbeat(pending: int):
         log.warning(f"could not write heartbeat: {e}")
 
 
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text())
-        except Exception:
-            pass
-    return {}
+def get_cfg(key: str, default: str = ""):
+    """The saved connection file (written by the web UI, see connection.py) wins over env vars."""
+    return connection.load().get(key, os.getenv(key, default))
 
 
-def get_cfg(key: str, default: str = "") -> str:
-    return load_config().get(key, os.getenv(key, default))
+def account_routes() -> dict:
+    raw = get_cfg("ACCOUNT_ROUTES", "")
+    return raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
 
 
 def ensure_dirs():
     for d in [WATCH_DIR, DONE_DIR, ERROR_DIR]:
         d.mkdir(parents=True, exist_ok=True)
-
-
-def ensure_budget_loaded() -> bool:
-    try:
-        if not requests.get(f"{BRIDGE_URL}/health", timeout=5).ok:
-            return False
-    except Exception:
-        return False
-
-    server_url = get_cfg("ACTUAL_SERVER_URL")
-    password   = get_cfg("ACTUAL_PASSWORD")
-    budget_id  = get_cfg("ACTUAL_BUDGET_ID")
-    enc_pass   = get_cfg("ACTUAL_ENCRYPTION_PASSWORD")
-
-    if not all([server_url, password, budget_id]):
-        log.warning("No Actual connection yet — load a budget once in the web UI — skipping import")
-        return False
-
-    body = {"serverURL": server_url, "password": password, "budgetId": budget_id}
-    if enc_pass:
-        body["encryptionPassword"] = enc_pass
-
-    try:
-        return requests.post(f"{BRIDGE_URL}/budgets/load", json=body, timeout=60).ok
-    except Exception as e:
-        log.error(f"Failed to load budget: {e}")
-        return False
-
-
-def fetch_context() -> tuple[ActualContext, dict]:
-    r = requests.get(f"{BRIDGE_URL}/context", timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    return ActualContext.from_bridge(data), data
-
-
-def _find_account(target, accounts: list[dict]) -> dict | None:
-    for a in accounts:
-        if a.get("id") == target or a.get("name", "").strip().lower() == str(target).strip().lower():
-            return a
-    return None
-
-
-def fetch_matches(transactions: list[dict]) -> list[dict]:
-    try:
-        r = requests.post(f"{BRIDGE_URL}/accounts/match", json=acct.match_request(transactions), timeout=90)
-        r.raise_for_status()
-        return r.json().get("accounts", [])
-    except Exception as e:
-        log.warning(f"  /accounts/match unavailable: {e}")
-        return []
-
-
-def resolve_account(info, transactions: list[dict], filename: str,
-                    accounts: list[dict], rows: list[dict] | None = None) -> tuple[str, str]:
-    """
-    → (account_id, why). Order:
-      1. remembered — this card/account number was imported somewhere before (UI or scheduler)
-      2. ACCOUNT_ROUTES — keys matched against "bank kind account-type last4 filename",
-         e.g. {"2583": "UOB One Card", "uob deposit": "UOB One Account", "posb": "POSB"}
-      3. recommender — only if confident (see accounts.AUTO_MIN_SCORE / MARGIN)
-      4. ACTUAL_ACCOUNT_ID fallback
-    Never guesses between close candidates: better to land in error/ than the wrong account.
-    """
-    open_accounts = [a for a in accounts if not a.get("closed")]
-
-    remembered = acct.load_map().get(info.fingerprint, {}).get("account_id")
-    if remembered and _find_account(remembered, open_accounts):
-        return remembered, f"remembered for {info.label}"
-
-    routes_raw = get_cfg("ACCOUNT_ROUTES", "")
-    routes = routes_raw if isinstance(routes_raw, dict) else (json.loads(routes_raw) if routes_raw else {})
-    haystack = " ".join([info.bank, info.kind.replace("_", " "), info.kind, info.account_type,
-                         info.last4, filename]).lower()
-    # longest key first so "uob deposit" beats "uob"
-    for key in sorted(routes, key=len, reverse=True):
-        if all(part in haystack for part in key.lower().split()):
-            a = _find_account(routes[key], open_accounts)
-            if not a:
-                raise ValueError(f"ACCOUNT_ROUTES['{key}'] → '{routes[key]}' not found (or closed) in Actual")
-            return a["id"], f"ACCOUNT_ROUTES['{key}']"
-
-    try:
-        rows = rows if rows is not None else fetch_matches(transactions)
-        rec = acct.recommend(info, transactions, rows, acct.match_counts(transactions, rows))
-        if rec["auto_select"]:
-            top = rec["suggestions"][0]
-            return top["account_id"], f"recommended ({'; '.join(top['reasons'])})"
-        if rec["suggestions"]:
-            log.info("  Recommender not confident: " + ", ".join(
-                f"{s['name']}={s['score']}" for s in rec["suggestions"][:3]))
-    except Exception as e:
-        log.warning(f"  Recommender unavailable: {e}")
-
-    fallback = get_cfg("ACTUAL_ACCOUNT_ID")
-    if fallback and _find_account(fallback, open_accounts):
-        return _find_account(fallback, open_accounts)["id"], "ACTUAL_ACCOUNT_ID fallback"
-    raise ValueError(f"Can't tell which account {info.label} ({filename}) belongs to — import it once "
-                     "in the web UI (it's remembered after that) or add an ACCOUNT_ROUTES entry")
-
-
-def post_import_checks(info, transactions: list[dict], account_id: str, account_name: str) -> dict:
-    """Queue duplicates / transfers found in Actual, then reconcile against the statement.
-    Learned patterns (e.g. card payment → card account) are applied automatically;
-    everything else waits in the review queue. → {review_ids, reconcile, error} for the history."""
-    out = {"review_ids": [], "reconcile": None, "error": None}
-    if not transactions:
-        return out
-    dates = sorted(t["date"] for t in transactions)
-    try:
-        rows, _ = bridge_client.txns(dates[0], dates[-1])
-        auto = []
-        for d in review.find_existing_duplicates([r for r in rows if r["account"] == account_id]):
-            it = review.enqueue("existing_duplicate", {**d, "account": account_id}, [d["a"]["id"], d["b"]["id"]])
-            out["review_ids"].append(it["id"])
-        last4 = {v["account_id"]: fp.rsplit("|", 1)[-1] for fp, v in acct.load_map().items()}
-        for p in review.find_transfer_pairs(rows, last4):
-            it = review.enqueue("transfer_pair", p, [p["a"]["id"], p["b"]["id"]])
-            out["review_ids"].append(it["id"])
-            if it["status"] == "auto" and it.get("decision"):
-                auto.append(it)
-        for it in auto:
-            res = bridge_client.apply_actions(bridge_client.actions_for(it))
-            review.mark_done(it["id"], res, ok=res["ok"])
-        if auto:
-            log.info(f"  Linked {len(auto)} transfer(s) using learned patterns")
-
-        hist, accts = bridge_client.txns(reconcile.EPOCH, info.period_end or dates[-1], [account_id])
-        others = [r for r in rows if r["account"] != account_id]
-        rep = reconcile.analyse(account_id, info, transactions, hist, None, None, account_name, others,
-                                cycle_day=reconcile.cycle_day(account_id))
-        queued = []
-        if rep["reconciled"]:
-            log.info("  Reconciled: Actual matches the bank balance")
-        else:
-            llm = LLMCategorizer()
-            use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true" and llm.enabled
-            queued = reconcile.agent(rep, transactions, llm)["queued"] if use_llm else reconcile.queue(rep)
-            gap = rep["gap"]
-            log.info(f"  Balance gap {gap/100 if gap is not None else '?'} — {len(queued)} fix(es) queued for review")
-        out["review_ids"] += [q["id"] for q in queued if q.get("id")]
-        out["reconcile"] = import_log.reconcile_summary(rep, queued)
-        counts = review.counts()
-        STATE.update(review_pending=counts.get("pending", 0))
-    except Exception as e:
-        log.warning(f"  Post-import checks skipped: {e}")
-        out["error"] = str(e)[:300]
-    return out
-
-
-def import_transactions(account_id: str, transactions: list[dict]) -> dict:
-    rows = []
-    for t in transactions:
-        legacy = list(t.get("legacy_ids") or [])
-        # id format used by older scheduler versions
-        legacy.append(f"auto-{t['date']}-{t['description']}-{t['amount']}".replace(" ", "-"))
-        rows.append({**t, "legacy_ids": legacy})
-    r = requests.post(
-        f"{BRIDGE_URL}/import",
-        json={"accountId": account_id, "transactions": rows},
-        timeout=120,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def _hist(fn, hid, *args, **kw):
-    """Write to the import history; a failure there is logged, never fatal."""
-    if not hid:
-        return
-    try:
-        fn(hid, *args, **kw)
-    except Exception as e:
-        log.warning(f"  Import history: {e}")
 
 
 def already_processed(path: Path) -> bool:
@@ -259,79 +75,41 @@ def already_processed(path: Path) -> bool:
 
 
 def process_file(path: Path):
+    """A Watch-folder import (statement_import.import_unattended): done/ on success, error/ otherwise."""
     log.info(f"Processing: {path.name}")
     STATE.update(last_file=path.name, last_run=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
-    stage, hid = "parse", None
     try:
-        content = path.read_bytes()
-        try:
-            hid = import_log.start("scheduler", path.name, content)
-        except Exception as e:                    # the history must never block an import
-            log.warning(f"  Import history unavailable: {e}")
-        transactions, bank, info = parse_statement(content, path.name)
-        log.info(f"  Parsed {len(transactions)} transactions — {info.label}")
-        _hist(import_log.set_statement, hid, info, len(transactions))
-
-        stage = "connect"
-        if not ensure_budget_loaded():
-            raise RuntimeError("Could not load Actual budget — check connection config")
-
-        stage = "account"
-        ctx, raw = fetch_context()
-        rows = fetch_matches(transactions)
-        account_id, why = resolve_account(info, transactions, path.name, raw.get("accounts", []), rows)
-        account_name = (_find_account(account_id, raw.get("accounts", [])) or {}).get("name", account_id)
-        log.info(f"  Account: {account_name} — {why}")
-        conflict = acct.cross_account_conflict(
-            account_id, transactions, acct.match_counts(transactions, rows),
-            {a["id"]: a.get("name", a["id"]) for a in raw.get("accounts", [])})
-        if conflict:
-            raise ValueError(f"Refusing to import into '{account_name}': {conflict}")
-        use_llm = get_cfg("SCHEDULER_USE_LLM", "true").lower() == "true"
-        enriched = enrich(transactions, ctx, account_id=account_id, use_llm=use_llm,
-                          history=history.get(ctx))
-        s = enriched["stats"]
-        log.info(f"  Categorised: actual={s['actual']} seed={s['seed']} llm={s['llm']} "
-                 f"transfer={s['transfer']} review={s['review']} unmapped={s['unmapped']}")
-
-        stage = "import"
-        result = import_transactions(account_id, enriched["transactions"])
-        acct.remember(info.fingerprint, account_id, account_name)
-        _hist(import_log.update, hid, stats=s)
-        _hist(import_log.record_result, hid, result, account_id, account_name, why)
-        log.info(f"  Imported: +{result.get('added', 0)} added, ~{result.get('updated', 0)} updated, "
-                 f"{result.get('skipped', 0)} skipped")
-        # possible duplicates → review queue (nothing is imported until you approve)
-        by_desc = {(t["date"], t["description"], t["amount"]): t for t in enriched["transactions"]}
-        held_ids = []
-        for u in result.get("unreviewed") or []:
-            row = by_desc.get((u["date"], u["description"], u["amount"]))
-            if row:
-                it = review.enqueue("import_duplicate", {"account": account_id, "account_name": account_name,
-                                                         "incoming": row, "reason": u.get("reason")},
-                                    [account_id, row["imported_id"]])
-                held_ids.append(it["id"])
-            log.warning(f"  Held for review (possible duplicate): {u['date']} {u['description'][:40]} "
-                        f"{u['amount']} — {u.get('reason', '')}")
-        stage = "checks"
-        checks = post_import_checks(info, enriched["transactions"], account_id, account_name)
-        _hist(import_log.add_review_ids, hid, held_ids + checks["review_ids"])
-        if checks["reconcile"]:
-            _hist(import_log.update, hid, reconcile=checks["reconcile"])
-        if result.get("errors"):
-            log.warning(f"  Import errors: {result['errors']}")
+        res = si.import_unattended("scheduler", path.name, path.read_bytes(), routes=account_routes(),
+                                   fallback=get_cfg("ACTUAL_ACCOUNT_ID") or None,
+                                   use_llm=str(get_cfg("SCHEDULER_USE_LLM", "true")).lower() == "true")
+        r = res["import"]
+        log.info(f"  {res['statement']['label']} → {res['account_name']} ({res['why']})")
+        log.info(f"  Imported: +{r.get('added', 0)} added, ~{r.get('updated', 0)} updated, "
+                 f"{r.get('skipped', 0)} skipped")
+        for name, st in res["steps"].items():
+            if not st["ok"]:
+                log.warning(f"  {name} skipped: {st['error']}")
+        held = res["steps"].get("hold_duplicates", {}).get("held")
+        if held:
+            log.warning(f"  {held} possible duplicate(s) held for review")
+        rec = (res.get("reconcile") or {}).get("report")
+        if rec:
+            log.info("  Reconciled: Actual matches the bank balance" if rec["reconciled"] else
+                     f"  Balance gap {rec['gap'] / 100 if rec['gap'] is not None else '?'} — fixes queued for review")
+        if r.get("errors"):
+            log.warning(f"  Import errors: {r['errors']}")
+        STATE.update(review_pending=review.counts().get("pending", 0))
 
         # Timestamp the filename to allow re-importing the same statement name later
         dest = DONE_DIR / f"{path.stem}_{int(time.time())}{path.suffix}"
         shutil.move(str(path), str(dest))
         log.info(f"  Moved to done: {dest.name}")
         STATE.update(last_result="ok", last_error=None,
-                     last_counts={k: result.get(k, 0) for k in ("added", "updated", "skipped")})
+                     last_counts={k: r.get(k, 0) for k in ("added", "updated", "skipped")})
 
     except Exception as e:
         log.error(f"  Error: {e}")
         STATE.update(last_result="error", last_error=str(e)[:300])
-        _hist(import_log.fail, hid, stage, e)
         dest = ERROR_DIR / path.name
         try:
             shutil.move(str(path), str(dest))

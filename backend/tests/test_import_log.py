@@ -1,4 +1,4 @@
-"""Import history: the log itself, the UI flow through the API, and undo."""
+"""Import history: the log itself."""
 import pytest
 
 import import_log
@@ -56,70 +56,4 @@ def test_reconcile_summary():
                                      [{"id": "r1"}])
     assert s["gap"] == -1250 and s["missing"] == 2 and s["fixes_queued"] == 1 and not s["reconciled"]
 
-
-def test_ui_flow_through_api(monkeypatch):
-    from fastapi.testclient import TestClient
-    import main
-
-    tx = [{"date": "2026-09-02", "description": "GRAB", "amount": 12.5, "is_credit": False}]
-    monkeypatch.setattr(main, "parse_statement_bytes", lambda content, name: (list(tx), "UOB", INFO))
-
-    async def no_ctx():
-        return None
-    monkeypatch.setattr(main, "get_context", no_ctx)
-    calls = []
-
-    async def fake_bridge(method, path, body=None, timeout=30):
-        calls.append((path, body))
-        if path == "/import":
-            if body.get("dryRun"):
-                return {"dryRun": True, "added": 1, "skipped": 0, "toVerify": []}
-            return {"added": 1, "skipped": 0, "addedIds": ["new-1"], "unreviewed": [], "errors": []}
-        if path == "/txns/delete":
-            return {"deleted": len(body["ids"])}
-        raise AssertionError(path)
-    monkeypatch.setattr(main, "_bridge", fake_bridge)
-    c = TestClient(main.app)
-
-    r = c.post("/parse", files={"file": ("CC_TXN.xls", b"bytes-1")})
-    assert r.status_code == 200, r.text
-    uid = r.json()["upload_id"]
-    assert r.json()["seen_before"] == []
-
-    # dry run leaves it "parsed"; uploadId/accountName never reach the bridge
-    c.post("/actual/import", json={"accountId": "acc1", "dryRun": True, "transactions": tx, "uploadId": uid,
-                                   "accountName": "UOB One Card"})
-    assert import_log.get(uid)["status"] == "parsed"
-    assert "uploadId" not in calls[-1][1] and "accountName" not in calls[-1][1]
-
-    c.post("/actual/import", json={"accountId": "acc1", "transactions": tx, "uploadId": uid, "accountName": "UOB One Card"})
-    lst = c.get("/imports").json()
-    assert lst["imports"][0]["id"] == uid and lst["imports"][0]["status"] == "imported"
-    assert lst["imports"][0]["added_ids_count"] == 1 and "added_ids" not in lst["imports"][0]
-    d = c.get(f"/imports/{uid}").json()
-    assert d["account_name"] == "UOB One Card" and d["added_ids"] == ["new-1"]
-
-    f = c.get(f"/imports/{uid}/file")
-    assert f.status_code == 200 and f.content == b"bytes-1" and "CC_TXN.xls" in f.headers["content-disposition"]
-
-    # same file again → seen_before points at the first upload
-    r2 = c.post("/parse", files={"file": ("renamed.xls", b"bytes-1")}).json()
-    assert [s["id"] for s in r2["seen_before"]] == [uid]
-
-    u = c.post(f"/imports/{uid}/undo")
-    assert u.status_code == 200 and calls[-1] == ("/txns/delete", {"ids": ["new-1"]})
-    assert c.get(f"/imports/{uid}").json()["status"] == "undone"
-    assert c.post(f"/imports/{uid}/undo").status_code == 409
-
-
-def test_parse_failure_is_recorded(monkeypatch):
-    from fastapi.testclient import TestClient
-    import main
-
-    def boom(content, name):
-        raise ValueError("not a UOB/POSB export")
-    monkeypatch.setattr(main, "parse_statement_bytes", boom)
-    c = TestClient(main.app)
-    assert c.post("/parse", files={"file": ("weird.csv", b"x")}).status_code == 422
-    r = c.get("/imports").json()["imports"][0]
-    assert (r["status"], r["stage"], r["filename"]) == ("failed", "parse", "weird.csv")
+# The UI flow through the API (upload → preview → commit → undo) lives in test_statement_import.py.

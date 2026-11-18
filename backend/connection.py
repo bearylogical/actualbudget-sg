@@ -70,9 +70,11 @@ def clear() -> dict:
 
 
 def load_body() -> dict | None:
-    """The saved connection as a bridge /budgets/load body, or None if incomplete."""
+    """The saved connection as a bridge /budgets/load body, or None if incomplete.
+    Env vars (ACTUAL_SERVER_URL, ...) fill in for a headless setup; the saved file wins."""
     cfg = load()
-    body = {field: cfg[key] for field, key in FIELDS.items() if cfg.get(key)}
+    body = {field: cfg.get(key) or os.getenv(key, "") for field, key in FIELDS.items()}
+    body = {k: v for k, v in body.items() if v}
     return body if all(body.get(f) for f in ("serverURL", "password", "budgetId")) else None
 
 

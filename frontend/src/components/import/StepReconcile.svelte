@@ -11,9 +11,10 @@
   export let accountId = '';
   export let accountName = '';
   export let statement = null;
-  export let transactions = [];
+  export let count = 0;                 // statement rows that were imported
   export let aiAvailable = false;
-  export let uploadId = '';
+  export let sessionId = '';
+  export let initial = null;            // the reconcile the commit already ran (closing balance, no AI)
 
   const API = '/api';
   const dispatch = createEventDispatcher();
@@ -32,21 +33,24 @@
   async function run(useLLM = false) {
     running = true; error = ''; usedAI = useLLM;
     try {
-      const body = { account_id: accountId, statement, transactions, use_llm: useLLM, uploadId };
+      const body = { use_llm: useLLM };
       if (balance !== '' && balance != null) body.balance = isCard ? -Math.abs(Number(balance)) : Number(balance);
       if (isCard && statementDate) body.statement_date = statementDate;
-      res = await readJson(await fetch(`${API}/reconcile`, {
+      res = await readJson(await fetch(`${API}/imports/${sessionId}/reconcile`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       }));
       if (res.queued?.length) dispatch('queued', res.queued.length);
     } catch (e) { error = e.message; }
     finally { running = false; }
   }
-  onMount(() => { if (accountId) run(false); });
+  onMount(() => {
+    if (initial?.report) { res = initial; if (res.queued?.length) dispatch('queued', res.queued.length); }
+    else if (accountId && sessionId) run(false);
+  });
 
   $: r = res?.report;
   $: cyc = r?.card_cycle;
-  $: total = transactions.length;
+  $: total = count;
   $: cycleCheck = !cyc ? [] : cyc.statement_date
     ? [{ level: cyc.cycle_gap === 0 ? 'ok' : 'warn',
          title: cyc.cycle_gap === 0
