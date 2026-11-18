@@ -587,6 +587,30 @@ async def review_advise(body: dict | None = None):
     return {"advised": len(verdicts), "items": review.list_items("pending")}
 
 
+@app.post("/review/hunt")
+async def review_hunt(body: dict | None = None):
+    """AI hunt: an LLM agent searches Actual for duplicates and unreconciled transfers and
+    queues what it finds for approval. {days: 90} or {start, end}, account_ids?, instructions?"""
+    import hunt
+    llm = LLMCategorizer()
+    if not llm.enabled:
+        raise HTTPException(400, "LLM is not configured (LLM_PROVIDER)")
+    body = body or {}
+    end = body.get("end") or _date.today().isoformat()
+    start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 90)))).isoformat()
+    try:
+        rows, accts = await run_in_threadpool(bridge_client.txns, start, end, body.get("account_ids"))
+    except bridge_client.BridgeError as e:
+        raise HTTPException(502, str(e))
+    try:
+        res = await run_in_threadpool(hunt.run, rows, accts, (start, end), llm, _account_last4(),
+                                      str(body.get("instructions") or ""))
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"LLM request failed: {e}")
+    res["counts"] = review.counts()
+    return res
+
+
 @app.post("/review/accept-ai")
 async def review_accept_ai(body: dict | None = None):
     """Bulk-approve pending items whose AI verdict is at least min_confidence (default 0.8).

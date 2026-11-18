@@ -9,7 +9,7 @@ import pytest
 import oauth
 from conftest import MCP_DIR
 
-WRITE_TOOLS = {"review_scan", "category_scan", "review_ask_ai", "review_decide", "reconcile_account",
+WRITE_TOOLS = {"review_scan", "category_scan", "review_ask_ai", "review_hunt", "review_decide", "reconcile_account",
                "ibkr_to_ghostfolio_import", "ghostfolio_clear_cash",
                "ghostfolio_update_activity", "ghostfolio_delete_activity"}
 # The exact set a read-only / public server exposes. Adding a tool here is a conscious decision:
