@@ -26,13 +26,20 @@ Two layers:
 """
 from __future__ import annotations
 
+import calendar
 import itertools
+import json
+import os
 from datetime import date as _date, timedelta
+from pathlib import Path
 
 import review
 from accounts import StatementInfo
 
 EPOCH = "2000-01-01"
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+CYCLE_FILE = DATA_DIR / "card_cycles.json"
+CYCLE_SEARCH_DAYS = 62      # how far back from the export date a statement date is looked for
 
 
 def _cents(t: dict) -> int:
@@ -91,6 +98,113 @@ def match(statement_rows: list[dict], actual_rows: list[dict]) -> tuple[list, li
     return matched, missing, extra
 
 
+# ── credit cards: statement cycle ────────────────────────────────────────────
+#
+# A card export's "Statement Balance" is what you owed on the last STATEMENT DATE (the
+# cycle cut-off, e.g. the 12th of each month), not on the export date, and the bank cuts
+# it by POSTING date. The export itself has every row posted since, so:
+#
+#   1. find the statement date D — entered by you, remembered from last time (cards keep a
+#      fixed day of month), or inferred: the day where Actual's balance, counting each
+#      matched row on its POSTING date, equals −Statement Balance;
+#   2. roll forward: owed today = Statement Balance + everything the export posted after D;
+#   3. compare that with Actual today — now an exact, to-the-cent check, so the usual
+#      missing / extra / duplicate / subset-solver plan applies.
+#
+# If no day matches and nothing was entered, the check stays advisory and says what to enter.
+
+def _load_cycles() -> dict:
+    try:
+        return json.loads(CYCLE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def cycle_day(account_id: str) -> int | None:
+    """Remembered statement day-of-month for a card account."""
+    v = _load_cycles().get(account_id)
+    return int(v) if v else None
+
+
+def remember_cycle_day(account_id: str, statement_date: str):
+    d = _load_cycles()
+    d[account_id] = _date.fromisoformat(statement_date).day
+    CYCLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CYCLE_FILE.write_text(json.dumps(d, indent=1))
+
+
+def _last_cycle_date(day: int, on_or_before: str) -> str:
+    """Most recent date with this day-of-month (clamped to short months) on or before a date."""
+    ref = _date.fromisoformat(on_or_before)
+    y, m = ref.year, ref.month
+    for _ in range(3):
+        d = _date(y, m, min(day, calendar.monthrange(y, m)[1]))
+        if d <= ref:
+            return d.isoformat()
+        y, m = (y, m - 1) if m > 1 else (y - 1, 12)
+    return ref.isoformat()
+
+
+def _posted(s: dict) -> str:
+    return s.get("posting_date") or s["date"]
+
+
+def card_cycle(info: StatementInfo, statement_rows: list[dict], actual_rows: list[dict], as_of: str,
+               statement_date: str | None = None, remembered_day: int | None = None) -> dict | None:
+    """→ {statement_date, source, windows, cycle_gap, unbilled, expected_today, …} or None (no balance)."""
+    if info.balance is None:
+        return None
+    target = -round(info.balance * 100)                    # owed → negative in Actual
+    top = [a for a in actual_rows if not a.get("is_child") and a["date"] <= as_of]
+    start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
+    stmt = [t for t in statement_rows if start <= t["date"] <= as_of]
+    matched, _, _ = match(stmt, [a for a in top if a["date"] >= start])
+    posted_on = {a["id"]: _posted(s) for s, a in matched}
+
+    def eff(a):
+        return posted_on.get(a["id"], a["date"])
+
+    def bal(day: str) -> int:
+        return sum(a["amount"] for a in top if eff(a) <= day)
+
+    lo = max(_date.fromisoformat(start), _date.fromisoformat(as_of) - timedelta(days=CYCLE_SEARCH_DAYS))
+    days = [(lo + timedelta(days=i)).isoformat() for i in range((_date.fromisoformat(as_of) - lo).days + 1)]
+    diffs = {d: target - bal(d) for d in days}
+    windows: list[list[str]] = []
+    for d in days:
+        if diffs[d] == 0:
+            if windows and (_date.fromisoformat(d) - _date.fromisoformat(windows[-1][1])).days == 1:
+                windows[-1][1] = d
+            else:
+                windows.append([d, d])
+
+    D, source = None, None
+    if statement_date:
+        D, source = statement_date, "you entered it"
+    elif remembered_day:
+        D, source = _last_cycle_date(remembered_day, as_of), f"your card's statement day ({remembered_day}) — remembered"
+    elif windows:
+        # the LATEST stretch where Actual equals the statement balance; its first day, because
+        # anything posted inside the stretch that Actual lacks must come after the cut-off
+        D, source = windows[-1][0], "inferred — the day Actual matches the statement balance"
+
+    out = {"statement_balance": target, "statement_date": D, "source": source,
+           "windows": windows[-3:], "searched_from": days[0] if days else None,
+           "skipped_pending": info.skipped_pending}
+    if D is None:
+        near = min(days, key=lambda d: (abs(diffs[d]), d), default=None)
+        out.update({"cycle_gap": None, "unbilled": None, "expected_today": None,
+                    "nearest": {"date": near, "gap": diffs[near]} if near else None})
+        return out
+    cycle_gap = target - bal(D)
+    after = [s for s in statement_rows if D < _posted(s) <= as_of]
+    unbilled = sum(_cents(s) for s in after)
+    out.update({"cycle_gap": cycle_gap, "unbilled": unbilled, "posted_since": len(after),
+                "expected_today": target + unbilled,
+                "export_covers_cycle": start <= (_date.fromisoformat(D) + timedelta(days=1)).isoformat()})
+    return out
+
+
 def subset_to_target(candidates: list[tuple[str, int]], target: int, max_items: int = 4,
                      limit: int = 5) -> list[list[str]]:
     """Exact combinations (ids) whose effects sum to target cents, fewest items first."""
@@ -113,15 +227,26 @@ def subset_to_target(candidates: list[tuple[str, int]], target: int, max_items: 
 
 def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
             actual_rows: list[dict], override_balance: float | None = None,
-            as_of: str | None = None, account_name: str = "", other_rows: list[dict] | None = None) -> dict:
-    """Pure function: everything needed to explain the gap. actual_rows: this account, full history."""
+            as_of: str | None = None, account_name: str = "", other_rows: list[dict] | None = None,
+            statement_date: str | None = None, cycle_day: int | None = None) -> dict:
+    """Pure function: everything needed to explain the gap. actual_rows: this account, full history.
+    Card statements: statement_date (the cycle cut-off) or a remembered cycle_day make the check exact."""
     as_of = as_of or info.period_end or max((t["date"] for t in statement_rows), default=None)
     start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
     top = [a for a in actual_rows if not a.get("is_child")]
     actual_bal = sum(a["amount"] for a in top if a["date"] <= as_of)
     expected, basis = expected_balance(info, override_balance)
+    is_card = info.kind == "credit_card" or info.balance_is_owed
     # a card export's "Statement Balance" is as of the last statement date, not the export date
-    balance_reliable = override_balance is not None or not (info.kind == "credit_card" or info.balance_is_owed)
+    balance_reliable = override_balance is not None or not is_card
+    cycle = None
+    if is_card and override_balance is None and as_of:
+        cycle = card_cycle(info, statement_rows, actual_rows, as_of, statement_date, cycle_day)
+        if cycle and cycle["expected_today"] is not None:
+            expected, balance_reliable = cycle["expected_today"], True
+            basis = (f"card statement balance {-cycle['statement_balance']/100:,.2f} owed on "
+                     f"{cycle['statement_date']} ({cycle['source']}), plus {cycle['posted_since']} "
+                     f"row(s) posted since")
     gap = None if expected is None else expected - actual_bal
 
     in_period = [a for a in top if start <= a["date"] <= as_of]
@@ -177,6 +302,7 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
                             "constant_offset": offsets[0]["offset"] if offsets and not first_divergence else None},
         "exact_combinations": exact,
         "residual_after_full_sync": residual,
+        "card_cycle": cycle,
     }
     report["recommendation"] = recommend(report, missing, extra)
     return report
@@ -201,7 +327,7 @@ def recommend(r: dict, missing: list[dict], extra: list[dict]) -> list[dict]:
         return []
     for d in r["duplicates"]:
         a, b = d["a"], d["b"]
-        drop = b if str(a.get("imported_id") or "").startswith("ref-") or not b.get("imported_id") else a
+        drop = a if (d.get("suggest") or review.drop_choice(a, b)) == "delete_a" else b
         plans.append({"fix_type": "delete_duplicate", "title": f"Delete duplicate {drop.get('payee')} {drop['amount']/100:.2f} on {drop['date']}",
                       "why": d["reason"], "actions": [{"type": "delete", "ids": [drop["id"]]}], "effect": -drop["amount"]})
     dup_ids = {p["actions"][0]["ids"][0] for p in plans}
@@ -213,8 +339,15 @@ def recommend(r: dict, missing: list[dict], extra: list[dict]) -> list[dict]:
     explained = sum(p["effect"] for p in plans)
     gap = r["gap"]
     if gap is not None and gap != explained and not r["balance_reliable"]:
-        plans.append({"fix_type": "investigate", "title": "Enter what you owe today to check the card balance",
-                      "why": r["basis"], "actions": [], "effect": 0})
+        cyc = r.get("card_cycle") or {}
+        near = cyc.get("nearest")
+        why = ("no day since " + str(cyc.get("searched_from")) + " has Actual at the statement balance"
+               + (f" (closest: {near['date']}, off by {near['gap']/100:,.2f} — likely missing or duplicated rows "
+                  "from before the export starts)" if near else "")
+               if cyc else r["basis"])
+        plans.append({"fix_type": "investigate",
+                      "title": "Enter the statement date from your card e-statement (or what you owe today)",
+                      "why": why, "actions": [], "effect": 0})
         return plans
     if gap is not None and gap != explained:
         remainder = gap - explained

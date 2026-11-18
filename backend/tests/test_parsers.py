@@ -85,3 +85,4 @@ def test_uob_card_pending_rows_are_held_back():
     buf = io.BytesIO(); df.to_excel(buf, header=False, index=False)
     tx, _, info = parse_statement(buf.getvalue(), "CC_TXN_History.xlsx")
     assert info.skipped_pending == 1 and len(tx) == 3
+    assert all(t["posting_date"] == "2026-09-28" for t in tx)      # card balances are cut by posting date

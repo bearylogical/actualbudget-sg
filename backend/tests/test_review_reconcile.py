@@ -32,6 +32,36 @@ def test_existing_duplicates_ignore_distinct_bank_refs():
     assert len(d) == 1 and {d[0]["a"]["id"], d[0]["b"]["id"]} == {"m1", "m2"}
 
 
+def test_existing_duplicates_catch_same_merchant_in_different_export_text():
+    # the xls says "SHOPEE SINGAPORE MP", the PDF says "SHOPEE SG MP SINGAPORE"; same charge, two id schemes
+    rows = [tx("x", "c", "2026-09-02", -2590, "Shopee", "ref-77", "SHOPEE SINGAPORE MP"),
+            tx("p", "c", "2026-09-03", -2590, "SHOPEE SG MP", "h3", "SHOPEE SG MP SINGAPORE")]
+    d = review.find_existing_duplicates(rows)
+    assert len(d) == 1 and d[0]["confidence"] == "medium" and d[0]["suggest"] == "delete_b"  # keep the bank ref
+
+
+def test_existing_duplicates_id_scheme_clash_same_day():
+    rows = [tx("x", "c", "2026-09-02", -1250, "Grab", "ref-9", "GRAB* A-7XYZ"),
+            tx("p", "c", "2026-09-02", -1250, "Grabfood", "h4", "GRABFOOD SINGAPORE")]
+    d = review.find_existing_duplicates(rows)
+    assert len(d) == 1 and "id schemes" in d[0]["reason"]
+    # different merchants, two different hashes → not flagged
+    rows = [tx("x", "c", "2026-09-02", -1250, "Kopi", "h1", "TOAST BOX"), tx("p", "c", "2026-09-02", -1250, "Bus", "h2", "BUS/MRT")]
+    assert review.find_existing_duplicates(rows) == []
+
+
+def test_cross_account_duplicates():
+    rows = [tx("a", "card", "2026-09-02", -4200, "NTUC", "ref-5", "NTUC FAIRPRICE SINGAPORE"),
+            tx("b", "sav", "2026-09-02", -4200, "NTUC", "ref-5", "NTUC FAIRPRICE SINGAPORE"),
+            tx("t1", "sav", "2026-09-04", -9900, "Card Payment", "h1", "PAYMT THRU E-BANK"),   # a transfer: opposite sign
+            tx("t2", "card", "2026-09-04", 9900, "Card Payment", "h2", "PAYMT THRU E-BANK")]
+    d = review.find_cross_account_duplicates(rows)
+    assert len(d) == 1 and d[0]["cross_account"] and d[0]["confidence"] == "high"
+    it = review.enqueue("existing_duplicate", {**d[0], "account": "card"}, ["a", "b"])
+    assert "both" in review.pattern_for("existing_duplicate", it["payload"])[1]
+    assert review.suggested_decision({**it, "llm": {"verdict": "duplicate"}}) is None   # you pick the account
+
+
 # ── queue & learning ─────────────────────────────────────────────────────────
 
 def pair(n, amount=-100):
@@ -194,3 +224,60 @@ def test_advisor_verdicts_saved(tmp_path):
     review.advise([it], llm)
     got = review.get(it["id"])
     assert got["llm"]["verdict"] == "transfer" and review.suggested_decision(got) == "link"
+
+
+# ── credit card cycle ────────────────────────────────────────────────────────
+
+def card_stmt(iid, date, amount, posted=None, credit=False):
+    return {**stmt(iid, date, amount, credit), "posting_date": posted or date}
+
+
+CARD = dict(bank="UOB", kind="credit_card", balance=150.0, balance_is_owed=True,
+            period_start="2026-08-20", period_end="2026-09-25")
+
+
+def card_history():
+    # owed 150.00 on the 12 Sep statement: 100 (25 Aug) + 50 (bought 11 Sep, POSTED 12 Sep)
+    s = [card_stmt("a", "2026-08-25", 100), card_stmt("b", "2026-09-11", 50, posted="2026-09-12"),
+         card_stmt("c", "2026-09-13", 30, posted="2026-09-14"),                # after the cut-off
+         card_stmt("p", "2026-09-20", 150, credit=True),                        # bill paid
+         card_stmt("d", "2026-09-21", 20, posted="2026-09-23")]
+    actual = [tx("1", "card", "2026-08-25", -10000, iid="a"), tx("2", "card", "2026-09-11", -5000, iid="b"),
+              tx("3", "card", "2026-09-13", -3000, iid="c"), tx("4", "card", "2026-09-20", 15000, iid="p"),
+              tx("5", "card", "2026-09-21", -2000, iid="d")]
+    return s, actual
+
+
+def test_card_statement_date_inferred_and_rolled_forward():
+    s, actual = card_history()
+    r = reconcile.analyse("card", StatementInfo(**CARD), s, actual)
+    cyc = r["card_cycle"]
+    assert cyc["statement_date"] == "2026-09-12" and cyc["source"].startswith("inferred")   # posting date, not 11 Sep
+    assert cyc["unbilled"] == -3000 + 15000 - 2000 and cyc["expected_today"] == -5000
+    assert r["balance_reliable"] and r["reconciled"]
+
+
+def test_card_cycle_finds_missing_row_after_statement():
+    s, actual = card_history()
+    actual = [a for a in actual if a["id"] != "5"]            # the 21 Sep charge never reached Actual
+    r = reconcile.analyse("card", StatementInfo(**CARD), s, actual)
+    assert r["balance_reliable"] and r["gap"] == -2000
+    assert [m["imported_id"] for m in r["missing"]] == ["d"]
+    assert r["recommendation"][0]["fix_type"] == "import_missing"
+
+
+def test_card_cycle_entered_date_is_remembered_and_exposes_cycle_gap():
+    s, actual = card_history()
+    actual = [a for a in actual if a["id"] != "1"]            # a pre-cycle row is missing → no day matches
+    r = reconcile.analyse("card", StatementInfo(**CARD), s, actual)
+    assert not r["balance_reliable"] and r["card_cycle"]["statement_date"] is None
+    assert "statement date" in r["recommendation"][-1]["title"]
+    r = reconcile.analyse("card", StatementInfo(**CARD), s, actual, statement_date="2026-09-12")
+    assert r["card_cycle"]["cycle_gap"] == -10000 and r["gap"] == -10000
+    assert [m["imported_id"] for m in r["missing"]] == ["a"]
+    reconcile.remember_cycle_day("card", "2026-09-12")
+    assert reconcile.cycle_day("card") == 12
+    r = reconcile.analyse("card", StatementInfo(**CARD), s, actual, cycle_day=reconcile.cycle_day("card"))
+    assert r["card_cycle"]["statement_date"] == "2026-09-12" and "remembered" in r["card_cycle"]["source"]
+    assert reconcile._last_cycle_date(31, "2026-09-25") == "2026-08-31"
+    assert reconcile._last_cycle_date(31, "2026-03-05") == "2026-02-28"

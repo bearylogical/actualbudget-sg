@@ -16,6 +16,8 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     import review
     monkeypatch.setattr(review, "DATA_DIR", tmp_path)
     monkeypatch.setattr(review, "DB_FILE", tmp_path / "review.db")
+    import reconcile
+    monkeypatch.setattr(reconcile, "CYCLE_FILE", tmp_path / "card_cycles.json")
     import import_log
     monkeypatch.setattr(import_log, "DATA_DIR", tmp_path)
     monkeypatch.setattr(import_log, "DB_FILE", tmp_path / "imports.db")

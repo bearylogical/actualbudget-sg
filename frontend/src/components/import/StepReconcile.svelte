@@ -18,6 +18,7 @@
   const API = '/api';
   const dispatch = createEventDispatcher();
   let balance = '';
+  let statementDate = '';               // card: the cycle cut-off printed on the e-statement
   let editBalance = false;
   let running = false;
   let usedAI = false;
@@ -33,6 +34,7 @@
     try {
       const body = { account_id: accountId, statement, transactions, use_llm: useLLM, uploadId };
       if (balance !== '' && balance != null) body.balance = isCard ? -Math.abs(Number(balance)) : Number(balance);
+      if (isCard && statementDate) body.statement_date = statementDate;
       res = await readJson(await fetch(`${API}/reconcile`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       }));
@@ -43,8 +45,21 @@
   onMount(() => { if (accountId) run(false); });
 
   $: r = res?.report;
+  $: cyc = r?.card_cycle;
   $: total = transactions.length;
+  $: cycleCheck = !cyc ? [] : cyc.statement_date
+    ? [{ level: cyc.cycle_gap === 0 ? 'ok' : 'warn',
+         title: cyc.cycle_gap === 0
+           ? `Statement balance ${money(-cyc.statement_balance)} matches Actual on ${day(cyc.statement_date)}`
+           : `On the ${day(cyc.statement_date)} statement Actual is off by ${money(Math.abs(cyc.cycle_gap))}`,
+         why: `Statement date ${cyc.source}. Rolled forward with ${cyc.posted_since} row${cyc.posted_since === 1 ? '' : 's'} posted since (${money(cyc.unbilled)}), you owe ${money(-cyc.expected_today)} today.` +
+              (cyc.export_covers_cycle ? '' : ' The export starts after the statement date, so rows in between may be missing.') }]
+    : [{ level: 'warn', title: 'Couldn’t find the statement date',
+         why: `No day since ${day(cyc.searched_from)} has Actual at the statement balance of ${money(-cyc.statement_balance)}` +
+              (cyc.nearest ? ` (closest ${day(cyc.nearest.date)}, off by ${money(Math.abs(cyc.nearest.gap))}).` : '.') +
+              ' Enter the statement date from your e-statement for an exact check.' }];
   $: checks = !r ? [] : [
+    ...cycleCheck,
     r.matched === 0 && r.missing.length
       ? { level: 'bad', title: `None of the ${r.missing.length} statement transactions are in ${accountName}`, why: 'This statement probably belongs to a different account.' }
       : r.missing.length
@@ -71,11 +86,18 @@
   <h1>Reconcile {accountName}</h1>
   <div class="muted">
     {#if !editBalance}
-      Bank balance {balance !== '' ? 'you entered' : `taken from the statement's closing balance${r?.as_of ? ` on ${day(r.as_of)}` : ''}`}.
-      <button class="linkish" on:click={() => (editBalance = true)}>Use a different balance</button>
+      {#if balance !== ''}Bank balance you entered.
+      {:else if cyc?.statement_date}Card statement balance on {day(cyc.statement_date)}, rolled forward with what's posted since.
+      {:else}Bank balance taken from the statement's closing balance{r?.as_of ? ` on ${day(r.as_of)}` : ''}.{/if}
+      <button class="linkish" on:click={() => (editBalance = true)}>{isCard ? 'Enter statement date or balance' : 'Use a different balance'}</button>
     {:else}
+      {#if isCard}
+        <label class="bal" title="The cut-off date on your monthly card e-statement — remembered for this card">Statement date
+          <input type="date" bind:value={statementDate} max={r?.as_of} />
+        </label>
+      {/if}
       <label class="bal">{isCard ? 'Amount owed today' : 'Bank balance today'}
-        <input type="number" step="0.01" bind:value={balance} placeholder={statement?.balance ?? ''} />
+        <input type="number" step="0.01" bind:value={balance} placeholder={isCard ? 'optional' : statement?.balance ?? ''} />
         <button class="ghost sm" on:click={() => run(usedAI)} disabled={running}>Check again</button>
       </label>
     {/if}
@@ -94,12 +116,13 @@
     <div class="tile"><span class="t-label">Actual</span><span class="t-value">{money(r.actual_balance)}</span></div>
     <div class="tile" class:ok={r.reconciled} class:warn={!r.reconciled}><span class="t-label">Difference</span><span class="t-value">{r.reconciled ? '$0.00' : money(Math.abs(r.gap))}</span></div>
   </div>
-  {#if !r.balance_reliable}<div class="banner warn"><span class="b-icon"><Icon name="info" size={20} /></span><div>{r.basis}</div></div>{/if}
+  {#if !r.balance_reliable && !cyc}<div class="banner warn"><span class="b-icon"><Icon name="info" size={20} /></span><div>{r.basis}</div></div>{/if}
 
   {#if r.reconciled}
     <div class="banner ok">
       <span class="b-icon"><Icon name="check" size={22} stroke={2.5} /></span>
-      <div class="grow"><strong>Balanced.</strong> <span class="muted">{r.matched} statement transactions matched in {accountName}.</span></div>
+      <div class="grow"><strong>Balanced.</strong> <span class="muted">{r.matched} statement transactions matched in {accountName}.{#if cyc?.statement_date}
+        Statement date {day(cyc.statement_date)} ({cyc.source}); {cyc.posted_since} row{cyc.posted_since === 1 ? '' : 's'} posted since.{/if}</span></div>
     </div>
   {:else}
     <div class="checks">
