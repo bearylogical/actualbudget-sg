@@ -136,7 +136,10 @@ def _money(c):
 def money_summary() -> dict:
     """Net worth, cash, card owed, investments (Ghostfolio), savings rate, this month's pace,
     safe-to-spend and the guidance list. Amounts in SGD."""
-    d = _req("GET", "/finance/summary?months=7")
+    return _summary_view(_req("GET", "/finance/summary?months=7"))
+
+
+def _summary_view(d: dict) -> dict:
     if "error" in d:
         return d
     return {
@@ -321,17 +324,16 @@ def weekly_snapshot() -> dict:
     """Everything a weekly money report needs in one call: last 7 days of spending vs your usual
     week (by category, top payees, largest items), month-to-date pace and guidance, net worth /
     cash / card / investments, pending review items, and service health. Read-only."""
-    week = _req("GET", "/finance/week?days=7")
-    summary = money_summary()
-    review = _req("GET", "/review/counts")
-    h = health()
-    if "error" not in week:
-        week = {**week, "spent": _money(week["spent"]), "usual_week": _money(week["usual_week"]),
-                "categories": [{**c, "spent": _money(c["spent"]), "usual_week": _money(c["usual_week"])} for c in week["categories"]],
-                "top_payees": [{**p, "spent": _money(p["spent"])} for p in week["top_payees"]],
-                "largest": [{**t, "amount": _money(t["amount"])} for t in week["largest"]],
-                "uncategorised": {**week["uncategorised"], "amount": _money(week["uncategorised"]["amount"])}}
-    return {"week": week, "month": summary, "review": review, "health": h,
+    d = _req("GET", "/finance/weekly?days=7")
+    if "error" in d:
+        return {"error": d["error"], "health": health()}
+    week = d["week"]
+    week = {**week, "spent": _money(week["spent"]), "usual_week": _money(week["usual_week"]),
+            "categories": [{**c, "spent": _money(c["spent"]), "usual_week": _money(c["usual_week"])} for c in week["categories"]],
+            "top_payees": [{**p, "spent": _money(p["spent"])} for p in week["top_payees"]],
+            "largest": [{**t, "amount": _money(t["amount"])} for t in week["largest"]],
+            "uncategorised": {**week["uncategorised"], "amount": _money(week["uncategorised"]["amount"])}}
+    return {"week": week, "month": _summary_view(d["summary"]), "review": d["review"], "health": _health_view(d["health"]),
             "note": "amounts in SGD; guidance is about cash flow, not investment advice"}
 
 
@@ -370,7 +372,10 @@ def monthly_trends(months: int = 12) -> dict:
 @read_tool()
 def health() -> dict:
     """Status of backend, Actual bridge/server, scheduler, LLM and Ghostfolio."""
-    d = _req("GET", "/health")
+    return _health_view(_req("GET", "/health"))
+
+
+def _health_view(d: dict) -> dict:
     return {"status": d.get("status"), **{k: v.get("status") for k, v in (d.get("components") or {}).items()}}
 
 

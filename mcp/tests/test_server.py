@@ -76,3 +76,33 @@ def test_req_maps_http_errors(monkeypatch):
     assert server._req("GET", "/x") == {"error": "nope"}
     monkeypatch.setattr(httpx, "request", fake(502, {"text": "<html>bad gateway</html>"}))
     assert server._req("GET", "/x") == {"error": "<html>bad gateway</html>"}
+
+
+def test_weekly_snapshot_is_one_backend_call(monkeypatch):
+    import server
+
+    week = {"from": "2026-09-09", "to": "2026-09-15", "spent": 8_800, "usual_week": 5_500, "vs_usual": 0.6,
+            "categories": [{"category": "Dining", "spent": 2_500, "usual_week": 1_000}],
+            "top_payees": [{"payee": "Ya Kun", "spent": 2_500}],
+            "largest": [{"date": "2026-09-12", "payee": "Uniqlo", "amount": 6_000, "account": "Card", "category": "Shopping"}],
+            "uncategorised": {"count": 1, "amount": 300}, "transactions": 3}
+    summary = {"as_of": "2026-09-15", "net_worth": 100_00, "cash": 50_00, "card_owed": 10_00, "investments": 0,
+               "savings_rate": 0.5, "emergency_months": 4.0, "month": {"spent": 8_500, "day": 15},
+               "categories": [], "guidance": [], "review_pending": 1, "accounts": []}
+    calls = []
+
+    def fake_req(method, path, body=None, timeout=300):
+        calls.append(path)
+        return {"week": week, "summary": summary, "review": {"pending": 1},
+                "health": {"status": "ok", "components": {"bridge": {"status": "ok"}}}}
+
+    monkeypatch.setattr(server, "_req", fake_req)
+    r = server.weekly_snapshot()
+    assert calls == ["/finance/weekly?days=7"]
+    assert r["week"]["spent"] == 88.0 and r["week"]["largest"][0]["amount"] == 60.0
+    assert r["month"]["net_worth"] == 100.0 and r["month"]["this_month"]["spent"] == 85.0
+    assert r["review"] == {"pending": 1} and r["health"] == {"status": "ok", "bridge": "ok"}
+
+    monkeypatch.setattr(server, "_req", lambda *a, **k: {"error": "Actual unreachable"} if "weekly" in a[1]
+                        else {"status": "degraded", "components": {}})
+    assert server.weekly_snapshot() == {"error": "Actual unreachable", "health": {"status": "degraded"}}

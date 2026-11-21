@@ -718,14 +718,25 @@ def _card_account_ids() -> set[str]:
     return {v["account_id"] for fp, v in acct.load_map().items() if "|credit_card|" in fp}
 
 
-@app.get("/finance/summary")
-async def finance_summary(months: int = 6):
+def _snapshot() -> finance.Snapshot:
+    import actual_gateway
+    return finance.Snapshot(actual_gateway.default(), ghost=ghostfolio.summary,
+                            card_ids=_card_account_ids, review_counts=review.counts)
+
+
+async def _finance(fn, *args):
+    """Run a Snapshot view in the threadpool: Actual unreachable → 502, bad input → 400."""
     try:
-        actual = await run_in_threadpool(bridge_client.call, "GET", f"/finance/summary?months={int(months)}")
+        return await run_in_threadpool(fn, *args)
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
-    ghost = await run_in_threadpool(ghostfolio.summary)
-    return finance.compute(actual, ghost, _card_account_ids(), review.counts().get("pending", 0))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/finance/summary")
+async def finance_summary(months: int = 6):
+    return await _finance(_snapshot().summary, months)
 
 
 @app.post("/finance/brief")
@@ -733,7 +744,7 @@ async def finance_brief():
     llm = LLMCategorizer()
     if not llm.enabled:
         raise HTTPException(400, "LLM is not configured (LLM_PROVIDER)")
-    summary = await finance_summary()
+    summary = await finance_summary(6)
     bullets = await run_in_threadpool(finance.brief, summary, llm)
     return {"bullets": bullets, "model": llm.model}
 
@@ -875,54 +886,27 @@ async def ghostfolio_delete_activity(activity_id: str, body: dict | None = None)
 @app.get("/finance/week")
 async def finance_week(days: int = 7):
     """Last N days of spending vs your usual week (previous 4 weeks)."""
-    today = _date.today()
-    start = (today - _td(days=days - 1 + 28)).isoformat()
-    try:
-        rows, accts = await run_in_threadpool(bridge_client.txns, start, today.isoformat())
-        ctx = await run_in_threadpool(bridge_client.call, "GET", "/context")
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
-    return finance.week(rows, names, today, days)
+    return await _finance(_snapshot().week, days)
 
 
 @app.get("/finance/transactions")
 async def finance_transactions(start: str = "", end: str = "", q: str = "", account: str = "",
                                category: str = "", kind: str = "all", limit: int = 200):
     """Historical Actual transactions, filtered, newest first (default: last 30 days, max 500 rows)."""
-    try:
-        end_d = _date.fromisoformat(end) if end else _date.today()
-        start_d = _date.fromisoformat(start) if start else end_d - _td(days=29)
-    except ValueError:
-        raise HTTPException(400, "start/end must be YYYY-MM-DD")
-    if start_d > end_d:
-        raise HTTPException(400, "start is after end")
-    if kind not in finance.TXN_KINDS:
-        raise HTTPException(400, f"kind must be one of {', '.join(finance.TXN_KINDS)}")
-    try:
-        rows, _ = await run_in_threadpool(bridge_client.txns, start_d.isoformat(), end_d.isoformat())
-        ctx = await run_in_threadpool(bridge_client.call, "GET", "/context")
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    names = {c["id"]: c["name"] for c in ctx.get("categories", [])}
-    r = finance.transactions(rows, names, q, account, category, kind, min(max(limit, 1), 500))
-    return {"from": start_d.isoformat(), "to": end_d.isoformat(), **r}
+    return await _finance(_snapshot().transactions, start, end, q, account, category, kind, limit)
 
 
 @app.get("/finance/trends")
 async def finance_trends(months: int = 12):
     """Monthly income / spending / categories and month-end balances for the last N months (max 24)."""
-    months = min(max(months, 1), 24)
-    today = _date.today()
-    start = _date(today.year, today.month, 1)
-    for _ in range(months - 1):
-        start = (start - _td(days=1)).replace(day=1)
-    try:
-        actual = await run_in_threadpool(bridge_client.call, "GET", f"/finance/summary?months={months}")
-        rows, _ = await run_in_threadpool(bridge_client.txns, start.isoformat(), today.isoformat())
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    return finance.trends(actual, rows, _date.fromisoformat(actual.get("today") or today.isoformat()))
+    return await _finance(_snapshot().trends, months)
+
+
+@app.get("/finance/weekly")
+async def finance_weekly(days: int = 7):
+    """The weekly report in one call: {week, summary, review, health} (MCP weekly_snapshot)."""
+    snap = await _finance(_snapshot().weekly, days)
+    return {**snap, "health": await health.full_report(BRIDGE_URL)}
 
 
 # ── MCP audit trail (events from mcp / mcp-public) + Telegram digest ─────────

@@ -58,6 +58,12 @@ class HttpGateway:
         body = {"mappings": [{"description": m["payee"], "categoryId": m["category_id"]} for m in mappings]}
         return int(bridge_client.call("POST", "/rules", body, timeout=60).get("created") or 0)
 
+    def finance_summary(self, months: int) -> dict:
+        """Open accounts with balances, the last `months` budget months (income, spent, budgeted,
+        per-category budgeted/spent/balance — Actual's budget engine, only reachable from the bridge),
+        this month's uncategorised on-budget rows, and the bridge's today. → {accounts, months, uncategorised, today}"""
+        return bridge_client.call("GET", f"/finance/summary?months={int(months)}")
+
 
 _default = HttpGateway()
 
