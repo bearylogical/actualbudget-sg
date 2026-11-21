@@ -25,7 +25,7 @@ RUN set -e; \
 that is not on npm, set ACTUAL_API_VERSION in .env." >&2; exit 1; }
 
 COPY polyfill.js .
-COPY index.js dedup.js ./
+COPY index.js dedup.js rows.js ./
 RUN mkdir -p /data/actual
 
 EXPOSE 3001

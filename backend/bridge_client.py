@@ -7,6 +7,7 @@ import threading
 import httpx
 
 import connection
+import money
 
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
@@ -77,6 +78,17 @@ def txns(start: str, end: str, account_ids: list[str] | None = None) -> tuple[li
     return d["transactions"], d["accounts"]
 
 
+def import_rows(account_id: str, rows: list[dict], *, dry_run: bool = False,
+                verified: dict[str, str] | None = None, reimport_deleted: bool | None = None) -> dict:
+    """POST Statement rows to the bridge's /import as Actual rows (money.to_actual) and hand the
+    answer back in Statement rows (money.restate_import)."""
+    body = {"accountId": account_id, "rows": [money.to_actual(t) for t in rows], "dryRun": dry_run,
+            "verified": verified or {}}
+    if reimport_deleted is not None:
+        body["reimportDeleted"] = reimport_deleted
+    return money.restate_import(rows, call("POST", "/import", body, timeout=120))
+
+
 def apply_actions(actions: list[dict]) -> dict:
     """
     Execute approved actions in order. Supported:
@@ -96,8 +108,8 @@ def apply_actions(actions: list[dict]) -> dict:
                             ("keep_id", "other_id", "keep_account", "other_account", "date")}]}))
         elif t == "import":
             rows = a["transactions"]
-            r = call("POST", "/import", {"accountId": a["account"], "transactions": rows, "reimportDeleted": True,
-                                         "verified": {r["imported_id"]: "import" for r in rows}})
+            r = import_rows(a["account"], rows, reimport_deleted=True,
+                            verified={r["imported_id"]: "import" for r in rows})
             got = (r.get("added") or 0) + (r.get("updated") or 0)
             if got < len(rows):
                 r.setdefault("errors", []).append(f"only {got} of {len(rows)} rows were imported")

@@ -12,11 +12,11 @@ from __future__ import annotations
 import calendar
 from datetime import date
 
-CARD_WORDS = ("card", "credit", "visa", "master", "amex")
+from accounts import is_card
 
 
 def _is_card(acct: dict, card_ids: set[str]) -> bool:
-    return acct["id"] in card_ids or any(w in (acct.get("name") or "").lower() for w in CARD_WORDS)
+    return is_card(acct, card_ids=card_ids)
 
 
 def compute(actual: dict, ghost: dict | None, card_ids: set[str] | None = None,

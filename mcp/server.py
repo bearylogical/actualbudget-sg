@@ -235,15 +235,14 @@ def reconcile_account(account_id: str, bank_balance: float, as_of: str = "", use
     a = next((x for x in accts if x["id"] == account_id), None)
     if not a:
         return {"error": "unknown account id — call list_accounts"}
-    is_card = any(w in a["name"].lower() for w in ("card", "credit", "visa", "master", "amex"))
-    body = {"account_id": account_id, "balance": -abs(bank_balance) if is_card else bank_balance,
-            "statement": {"bank": "", "kind": "credit_card" if is_card else "deposit",
-                          "period_end": as_of or None}, "transactions": [], "use_llm": use_llm}
+    # the backend decides whether this is a card (and so whether the balance is owed)
+    body = {"account_id": account_id, "bank_balance": bank_balance, "statement": {"period_end": as_of or None},
+            "transactions": [], "use_llm": use_llm}
     d = _req("POST", "/reconcile", body)
     if "error" in d:
         return d
     r = d["report"]
-    return {"account": a["name"], "as_of": r["as_of"], "bank": _money(r["expected_balance"]),
+    return {"account": a["name"], "kind": r.get("kind"), "as_of": r["as_of"], "bank": _money(r["expected_balance"]),
             "actual": _money(r["actual_balance"]), "gap": _money(r["gap"]), "reconciled": r["reconciled"],
             "duplicates": r["duplicates"], "unlinked_transfers": r["transfers"],
             "proposals": [{"title": p["title"], "why": p["why"], "effect": _money(p["effect"])} for p in r["recommendation"]],

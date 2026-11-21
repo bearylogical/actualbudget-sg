@@ -1,0 +1,100 @@
+{
+  "_doc": "Golden cases for duplicate classification on /import. Run by actual-bridge/test/dedup.test.js (dedup.js classify) and backend/tests/test_classify_golden.py (FakeActual's port). incoming = Actual rows as backend/money.py to_actual builds them; existing = rows in Actual. Amounts are signed cents. expect lists imported_ids in incoming order; needs_verify entries are [imported_id, reason].",
+  "cases": [
+    {
+      "name": "bank-ref and legacy-id matches are duplicates",
+      "incoming": [
+        {"imported_id": "ref-1", "date": "2026-09-05", "amount": -180},
+        {"imported_id": "ref-2", "legacy_ids": ["h2"], "date": "2026-09-05", "amount": -500}
+      ],
+      "existing": [
+        {"id": "a", "imported_id": "ref-1", "date": "2026-09-05", "amount": -180},
+        {"id": "b", "imported_id": "h2", "date": "2026-09-05", "amount": -500}
+      ],
+      "expect": {"clearly_new": [], "clearly_dup": ["ref-1", "ref-2"], "needs_verify": []}
+    },
+    {
+      "name": "two identical coffees pair 1:1 with two already imported, a third is new",
+      "incoming": [
+        {"imported_id": "h", "date": "2026-09-05", "amount": -180},
+        {"imported_id": "h-1", "legacy_ids": ["h"], "date": "2026-09-05", "amount": -180},
+        {"imported_id": "h-2", "legacy_ids": ["h"], "date": "2026-09-05", "amount": -180}
+      ],
+      "existing": [
+        {"id": "a", "imported_id": "h", "date": "2026-09-05", "amount": -180},
+        {"id": "b", "imported_id": "h", "date": "2026-09-05", "amount": -180}
+      ],
+      "expect": {"clearly_new": ["h-2"], "clearly_dup": ["h", "h-1"], "needs_verify": []}
+    },
+    {
+      "name": "same txn under a different id (xls vs PDF) is held for review; the id in the reason is cut to 24 chars",
+      "incoming": [{"imported_id": "pdf-hash", "date": "2026-09-05", "amount": -850}],
+      "existing": [{"id": "a", "imported_id": "xls-hash-0123456789abcdef0123456789", "date": "2026-09-05", "amount": -850}],
+      "expect": {"clearly_new": [], "clearly_dup": [],
+                 "needs_verify": [["pdf-hash", "same date and amount already imported (id xls-hash-0123456789abcde)"]]}
+    },
+    {
+      "name": "hand-entered rows (no imported_id) are left to Actual to link",
+      "incoming": [{"imported_id": "x", "date": "2026-09-05", "amount": -850}],
+      "existing": [{"id": "a", "imported_id": null, "date": "2026-09-05", "amount": -850}],
+      "expect": {"clearly_new": ["x"], "clearly_dup": [], "needs_verify": []}
+    },
+    {
+      "name": "existing rows outside the statement range never trigger review",
+      "incoming": [
+        {"imported_id": "x", "date": "2026-09-05", "amount": -850},
+        {"imported_id": "y", "date": "2026-09-10", "amount": -100}
+      ],
+      "existing": [{"id": "a", "imported_id": "old", "date": "2026-09-01", "amount": -850}],
+      "expect": {"clearly_new": ["x", "y"], "clearly_dup": [], "needs_verify": []}
+    },
+    {
+      "name": "credits compare with positive cents",
+      "incoming": [{"imported_id": "x", "date": "2026-09-05", "amount": 10000}],
+      "existing": [{"id": "a", "imported_id": "other", "date": "2026-09-05", "amount": 10000}],
+      "expect": {"clearly_new": [], "clearly_dup": [],
+                 "needs_verify": [["x", "same date and amount already imported (id other)"]]}
+    },
+    {
+      "name": "a refund is not a twin of a charge of the same size",
+      "incoming": [{"imported_id": "x", "date": "2026-09-05", "amount": 10000}],
+      "existing": [{"id": "a", "imported_id": "other", "date": "2026-09-05", "amount": -10000}],
+      "expect": {"clearly_new": ["x"], "clearly_dup": [], "needs_verify": []}
+    },
+    {
+      "name": "a row claimed by an id match cannot also be a date+amount twin",
+      "incoming": [
+        {"imported_id": "a1", "date": "2026-09-05", "amount": -500},
+        {"imported_id": "b1", "date": "2026-09-05", "amount": -500}
+      ],
+      "existing": [{"id": "e1", "imported_id": "a1", "date": "2026-09-05", "amount": -500}],
+      "expect": {"clearly_new": ["b1"], "clearly_dup": ["a1"], "needs_verify": []}
+    },
+    {
+      "name": "each twin is claimed once: two new rows, one existing twin",
+      "incoming": [
+        {"imported_id": "p1", "date": "2026-09-05", "amount": -320},
+        {"imported_id": "p2", "date": "2026-09-05", "amount": -320}
+      ],
+      "existing": [{"id": "e1", "imported_id": "q", "date": "2026-09-05", "amount": -320}],
+      "expect": {"clearly_new": ["p2"], "clearly_dup": [],
+                 "needs_verify": [["p1", "same date and amount already imported (id q)"]]}
+    },
+    {
+      "name": "id matches win over twins regardless of order",
+      "incoming": [
+        {"imported_id": "new-id", "date": "2026-09-05", "amount": -700},
+        {"imported_id": "known", "date": "2026-09-05", "amount": -700}
+      ],
+      "existing": [{"id": "e1", "imported_id": "known", "date": "2026-09-05", "amount": -700}],
+      "expect": {"clearly_new": ["new-id"], "clearly_dup": ["known"], "needs_verify": []}
+    },
+    {
+      "name": "a row with no imported_id only goes through the twin check",
+      "incoming": [{"imported_id": null, "date": "2026-09-05", "amount": -250}],
+      "existing": [{"id": "e1", "imported_id": "z", "date": "2026-09-05", "amount": -250}],
+      "expect": {"clearly_new": [], "clearly_dup": [],
+                 "needs_verify": [[null, "same date and amount already imported (id z)"]]}
+    }
+  ]
+}

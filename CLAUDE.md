@@ -70,7 +70,9 @@ The **Scheduler** is a 4th service that watches a directory for `.xls/.xlsx` fil
 - **`backend/statement_import.py`** — The Statement import module: one Import session per statement (`open_session` → `preview` → `commit` → `reconcile` / `undo`). Both the web UI (`/imports/*` routes) and the scheduler (`import_unattended`) go through it; see `CONTEXT.md` for the terms.
 - **`backend/actual_gateway.py`** — The Actual gateway the import talks to Actual through. `backend/tests/fake_actual.py` is the in-memory adapter for tests.
 - **`backend/main.py`** — FastAPI routes: `/imports/*` (Statement import), `/export/csv`, review queue, reconcile, and proxy routes to `/actual/*` (pass-through to actual-bridge).
-- **`actual-bridge/index.js`** — Express server managing Actual Budget API state (credentials, loaded budget). Handles debit/credit logic and transaction splits on import.
+- **`backend/money.py`** — Money signs, decided once: Statement rows (abs `amount` + `is_credit`) ↔ Actual's signed integer cents (`to_actual`, splits included). The bridge's `/import` takes these Actual rows (`rows`) and passes amounts through.
+- **`backend/accounts.py`** — Statement fingerprints and account matching; `is_card` / `balance_cents` are the one card-ness / owed-balance rule.
+- **`actual-bridge/index.js`** — Express server managing Actual Budget API state (credentials, loaded budget). `dedup.js` (duplicate check, golden cases in `test/fixtures/classify.json` shared with `FakeActual`) and `rows.js` (payee resolution) do the import.
 - **`frontend/src/routes/+page.svelte`** — Monolithic main page: upload, transaction table, category editing, spending summary, Actual integration controls.
 - **`frontend/src/components/ActualSidebar.svelte`** — Connect to Actual server, select budget/account.
 - **`frontend/src/components/CategoryMapper.svelte`** — Map parsed categories to Actual Budget categories.

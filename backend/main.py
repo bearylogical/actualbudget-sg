@@ -649,7 +649,9 @@ async def review_forget(body: dict):
 
 @app.post("/reconcile")
 async def reconcile_account(body: dict):
-    """{account_id, statement?, transactions?, balance?, as_of?, use_llm?, statement_date?} → report + queued fixes.
+    """{account_id, statement?, transactions?, balance?, bank_balance?, as_of?, use_llm?, statement_date?}
+    → report + queued fixes. balance is signed as Actual shows it; bank_balance is as the bank shows it
+    (a card: what you owe, positive) and the backend decides whether the account is a card.
     statement_date: a card's statement (cycle) date, printed on the monthly e-statement — remembered per account."""
     if not body.get("account_id"):
         raise HTTPException(400, "account_id required")
@@ -662,7 +664,7 @@ async def reconcile_account(body: dict):
     try:
         res = await run_in_threadpool(recon_run, body["account_id"], info, body.get("transactions") or [],
                                       body.get("balance"), body.get("as_of"), body.get("use_llm", True),
-                                      body.get("statement_date") or None)
+                                      body.get("statement_date") or None, bank_balance=body.get("bank_balance"))
     except bridge_client.BridgeError as e:
         raise HTTPException(502, str(e))
     return res
@@ -715,7 +717,7 @@ import ghostfolio
 
 
 def _card_account_ids() -> set[str]:
-    return {v["account_id"] for fp, v in acct.load_map().items() if "|credit_card|" in fp}
+    return acct.card_account_ids()
 
 
 @app.get("/finance/summary")

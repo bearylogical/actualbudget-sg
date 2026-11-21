@@ -42,10 +42,8 @@ class HttpGateway:
                     verified: dict[str, str] | None = None, reimport_deleted: bool | None = None) -> dict:
         """Import statement rows. → {added, updated, skipped, addedIds, toVerify (dry run) / unreviewed, errors}.
         Rows matching an existing one only by date + amount are held back unless verified[imported_id] == "import"."""
-        body = {"accountId": account_id, "transactions": rows, "dryRun": dry_run, "verified": verified or {}}
-        if reimport_deleted is not None:
-            body["reimportDeleted"] = reimport_deleted
-        return bridge_client.call("POST", "/import", body, timeout=120)
+        return bridge_client.import_rows(account_id, rows, dry_run=dry_run, verified=verified,
+                                         reimport_deleted=reimport_deleted)
 
     def delete(self, ids: list[str]) -> dict:
         return bridge_client.call("POST", "/txns/delete", {"ids": ids}, timeout=60)
