@@ -308,3 +308,57 @@ def to_markdown(report: dict) -> str:
     section("Rules the preview can't evaluate (they still run in Actual)",
             [f'- {u["rule"]}' for u in report["unsupported_rules"][:30]])
     return "\n".join(L)
+
+
+# ── Rules sync ───────────────────────────────────────────────────────────────
+# The one place that turns an audit plan into writes. The web route (/rules/sync) and
+# rules_cli.py are thin adapters over sync().
+
+PARTS = ("aliases", "categories", "merge_payees", "rules", "duplicates", "broken")
+
+
+def _needs_new_category(rule: dict) -> bool:
+    return any(isinstance(a.get("value"), dict) and "$category" in a["value"]
+               for a in rule.get("actions") or [])
+
+
+def select(plan: dict, parts: dict) -> dict:
+    """The parts of an audit plan to apply, in the bridge's /rules/apply shape (plus aliases).
+    A rule that needs a category the sync isn't creating is left out — it can't be applied."""
+    on = lambda p: bool(parts.get(p))  # noqa: E731
+    rules = plan["create_rules"] if on("rules") else []
+    if not on("categories"):
+        rules = [r for r in rules if not _needs_new_category(r)]
+    return {
+        "aliases": plan["aliases"] if on("aliases") else {},
+        "createCategories": plan["create_categories"] if on("categories") else [],
+        "mergePayees": plan["merge_payees"] if on("merge_payees") else [],
+        "createRules": rules,
+        "deleteRules": (plan["delete_rules"] if on("duplicates") else [])
+                       + (plan["delete_broken_rules"] if on("broken") else []),
+    }
+
+
+def sync(gateway, parts: dict, *, dry_run: bool = True,
+         sample_descriptions: list[str] | None = None, all_seed: bool = False) -> dict:
+    """Audit the loaded budget, pick the chosen parts of the plan and (unless dry_run) apply them:
+    aliases are saved locally, everything else goes to Actual through the gateway.
+
+    → {dryRun, counts, plan} and, when applied, also {result, summary_after}."""
+    from taxonomy import load_aliases, save_aliases
+
+    def run_audit() -> dict:
+        ctx = ActualContext.from_bridge(gateway.context())
+        return audit(ctx, sample_descriptions, load_aliases(), all_seed)
+
+    selected = select(run_audit()["plan"], parts)
+    out = {"dryRun": bool(dry_run), "counts": {k: len(v) for k, v in selected.items()}, "plan": selected}
+    if dry_run:
+        return out
+
+    if selected["aliases"]:
+        save_aliases({**load_aliases(), **selected["aliases"]})
+    to_actual = {k: v for k, v in selected.items() if k != "aliases"}
+    out["result"] = gateway.apply_rules(to_actual) if any(to_actual.values()) else {"ok": True}
+    out["summary_after"] = run_audit()["summary"]
+    return out

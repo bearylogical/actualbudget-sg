@@ -12,11 +12,11 @@ from __future__ import annotations
 import calendar
 from datetime import date
 
-CARD_WORDS = ("card", "credit", "visa", "master", "amex")
+from accounts import is_card
 
 
 def _is_card(acct: dict, card_ids: set[str]) -> bool:
-    return acct["id"] in card_ids or any(w in (acct.get("name") or "").lower() for w in CARD_WORDS)
+    return is_card(acct, card_ids=card_ids)
 
 
 def compute(actual: dict, ghost: dict | None, card_ids: set[str] | None = None,
@@ -301,3 +301,69 @@ def trends(actual: dict, rows: list[dict], today: date | None = None) -> dict:
             "balance_end": {"on_budget": on, "off_budget": off, "total": on + off, "as_of": end},
         })
     return {"months": out, "note": "balances are Actual accounts only (open accounts); investments not included"}
+
+
+# ── The finance snapshot: one module the /finance/* routes and the MCP report go through ──
+
+class Snapshot:
+    """
+    Reads the loaded Actual budget through an Actual gateway (actual_gateway.py) and Ghostfolio,
+    and composes the Money views. Budget months and balances come from the gateway's
+    finance_summary (Actual's budget engine lives in actual-bridge); everything else is computed
+    here from raw rows. Raises GatewayError when Actual can't be reached, ValueError on bad input.
+    """
+
+    def __init__(self, gateway, ghost=None, card_ids=None, review_counts=None, today=None):
+        self.gw = gateway
+        self._ghost = ghost or (lambda: {"configured": False})
+        self._card_ids = card_ids or set
+        self._review_counts = review_counts or (lambda: {"pending": 0})
+        self._today = today or date.today
+
+    def _category_names(self) -> dict[str, str]:
+        return {c["id"]: c["name"] for c in self.gw.context().get("categories", [])}
+
+    def summary(self, months: int = 6) -> dict:
+        """Net worth, cash, this month's pace, category pacing and guidance (see compute)."""
+        actual = self.gw.finance_summary(min(max(int(months), 1), 24))
+        return compute(actual, self._ghost(), self._card_ids(), self._review_counts().get("pending", 0))
+
+    def week(self, days: int = 7) -> dict:
+        """Last `days` of spending vs your usual week (previous 4 weeks)."""
+        from datetime import timedelta
+        today = self._today()
+        rows, _ = self.gw.txns((today - timedelta(days=days - 1 + 28)).isoformat(), today.isoformat())
+        return week(rows, self._category_names(), today, days)
+
+    def transactions(self, start: str = "", end: str = "", q: str = "", account: str = "",
+                     category: str = "", kind: str = "all", limit: int = 200) -> dict:
+        """Filtered history, newest first (default: last 30 days, max 500 rows)."""
+        from datetime import timedelta
+        try:
+            end_d = date.fromisoformat(end) if end else self._today()
+            start_d = date.fromisoformat(start) if start else end_d - timedelta(days=29)
+        except ValueError:
+            raise ValueError("start/end must be YYYY-MM-DD")
+        if start_d > end_d:
+            raise ValueError("start is after end")
+        if kind not in TXN_KINDS:
+            raise ValueError(f"kind must be one of {', '.join(TXN_KINDS)}")
+        rows, _ = self.gw.txns(start_d.isoformat(), end_d.isoformat())
+        r = transactions(rows, self._category_names(), q, account, category, kind, min(max(limit, 1), 500))
+        return {"from": start_d.isoformat(), "to": end_d.isoformat(), **r}
+
+    def trends(self, months: int = 12) -> dict:
+        """Monthly income / spending / categories and month-end balances, last N months (max 24)."""
+        from datetime import timedelta
+        months = min(max(int(months), 1), 24)
+        today = self._today()
+        start = date(today.year, today.month, 1)
+        for _ in range(months - 1):
+            start = (start - timedelta(days=1)).replace(day=1)
+        actual = self.gw.finance_summary(months)
+        rows, _ = self.gw.txns(start.isoformat(), today.isoformat())
+        return trends(actual, rows, date.fromisoformat(actual.get("today") or today.isoformat()))
+
+    def weekly(self, days: int = 7) -> dict:
+        """Everything a weekly report needs: the week, the month summary and review counts."""
+        return {"week": self.week(days), "summary": self.summary(7), "review": self._review_counts()}

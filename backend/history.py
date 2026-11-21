@@ -24,6 +24,8 @@ import time
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
+import actual_gateway
+
 MIN_TIMES = int(os.getenv("HISTORY_MIN_TIMES", "2"))
 MIN_SHARE = float(os.getenv("HISTORY_MIN_SHARE", "0.8"))
 HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "365"))
@@ -112,8 +114,8 @@ _lock = threading.Lock()
 _cached: tuple[float, History] | None = None
 
 
-def get(ctx, refresh: bool = False, fetch=None) -> History | None:
-    """History from Actual (cached). fetch(start, end) → rows; defaults to the bridge."""
+def get(ctx, refresh: bool = False, gateway=None) -> History | None:
+    """History from Actual (cached), read through the Actual gateway (default: actual_gateway.default())."""
     global _cached
     if ctx is None:
         return None
@@ -121,11 +123,9 @@ def get(ctx, refresh: bool = False, fetch=None) -> History | None:
         if not refresh and _cached and time.time() - _cached[0] < HISTORY_TTL:
             return _cached[1]
     try:
-        if fetch is None:
-            import bridge_client
-            fetch = lambda s, e: bridge_client.txns(s, e)[0]
+        gateway = gateway or actual_gateway.default()
         end = date.today()
-        rows = fetch((end - timedelta(days=HISTORY_DAYS)).isoformat(), end.isoformat())
+        rows, _ = gateway.txns((end - timedelta(days=HISTORY_DAYS)).isoformat(), end.isoformat())
     except Exception:
         return _cached[1] if _cached else None
     h = History(rows, ctx.cat_by_id)

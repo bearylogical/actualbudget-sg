@@ -34,18 +34,13 @@ from datetime import date as _date, timedelta
 from pathlib import Path
 
 import review
-from accounts import StatementInfo
+from accounts import CARD, StatementInfo, balance_cents, is_card
+from money import signed_cents
 
 EPOCH = "2000-01-01"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 CYCLE_FILE = DATA_DIR / "card_cycles.json"
 CYCLE_SEARCH_DAYS = 62      # how far back from the export date a statement date is looked for
-
-
-def _cents(t: dict) -> int:
-    """parsed statement row → signed cents (money in positive)."""
-    c = round(float(t["amount"]) * 100)
-    return c if t.get("is_credit") else -c
 
 
 def _ids(t: dict) -> set:
@@ -57,10 +52,10 @@ def expected_balance(info: StatementInfo, override: float | None = None) -> tupl
         return round(override * 100), "you entered it"
     if info.balance is None:
         return None, "statement has no balance"
-    if info.kind == "credit_card" or info.balance_is_owed:
-        return -round(info.balance * 100), ("card statement balance — as of the last statement date, "
+    if is_card(info=info):
+        return balance_cents(info.balance, True), ("card statement balance — as of the last statement date, "
                                             "not the export date; enter today's owed amount for an exact check")
-    return round(info.balance * 100), "statement / running balance"
+    return balance_cents(info.balance, False), "statement / running balance"
 
 
 def match(statement_rows: list[dict], actual_rows: list[dict]) -> tuple[list, list, list]:
@@ -84,9 +79,9 @@ def match(statement_rows: list[dict], actual_rows: list[dict]) -> tuple[list, li
             pending.append(s)
     for s in pending:   # second pass: same date + amount (PDF vs xls, transfer counterparts, hand-typed)
         hit = next((a for a in actual_rows if a["id"] not in claimed and a["date"] == s["date"]
-                    and a["amount"] == _cents(s)), None)
+                    and a["amount"] == signed_cents(s)), None)
         if hit is None:  # allow ±2 days for hand-typed / counterpart rows
-            hit = next((a for a in actual_rows if a["id"] not in claimed and a["amount"] == _cents(s)
+            hit = next((a for a in actual_rows if a["id"] not in claimed and a["amount"] == signed_cents(s)
                         and abs((_date.fromisoformat(a["date"]) - _date.fromisoformat(s["date"])).days) <= 2
                         and not a.get("imported_id")), None)
         if hit:
@@ -154,7 +149,7 @@ def card_cycle(info: StatementInfo, statement_rows: list[dict], actual_rows: lis
     """→ {statement_date, source, windows, cycle_gap, unbilled, expected_today, …} or None (no balance)."""
     if info.balance is None:
         return None
-    target = -round(info.balance * 100)                    # owed → negative in Actual
+    target = balance_cents(info.balance, True)             # owed → negative in Actual
     top = [a for a in actual_rows if not a.get("is_child") and a["date"] <= as_of]
     start = info.period_start or min((t["date"] for t in statement_rows), default=as_of)
     stmt = [t for t in statement_rows if start <= t["date"] <= as_of]
@@ -198,7 +193,7 @@ def card_cycle(info: StatementInfo, statement_rows: list[dict], actual_rows: lis
         return out
     cycle_gap = target - bal(D)
     after = [s for s in statement_rows if D < _posted(s) <= as_of]
-    unbilled = sum(_cents(s) for s in after)
+    unbilled = sum(signed_cents(s) for s in after)
     out.update({"cycle_gap": cycle_gap, "unbilled": unbilled, "posted_since": len(after),
                 "expected_today": target + unbilled,
                 "export_covers_cycle": start <= (_date.fromisoformat(D) + timedelta(days=1)).isoformat()})
@@ -236,11 +231,11 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
     top = [a for a in actual_rows if not a.get("is_child")]
     actual_bal = sum(a["amount"] for a in top if a["date"] <= as_of)
     expected, basis = expected_balance(info, override_balance)
-    is_card = info.kind == "credit_card" or info.balance_is_owed
+    card = is_card(info=info)
     # a card export's "Statement Balance" is as of the last statement date, not the export date
-    balance_reliable = override_balance is not None or not is_card
+    balance_reliable = override_balance is not None or not card
     cycle = None
-    if is_card and override_balance is None and as_of:
+    if card and override_balance is None and as_of:
         cycle = card_cycle(info, statement_rows, actual_rows, as_of, statement_date, cycle_day)
         if cycle and cycle["expected_today"] is not None:
             expected, balance_reliable = cycle["expected_today"], True
@@ -260,7 +255,7 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
     dups = review.find_existing_duplicates(in_period)
     transfers = review.find_transfer_pairs(in_period + (other_rows or []))
     transfers = [p for p in transfers if account_id in (p["a"]["account"], p["b"]["account"])]
-    amount_mismatch = [(s, a) for s, a in matched if a["amount"] != _cents(s)]
+    amount_mismatch = [(s, a) for s, a in matched if a["amount"] != signed_cents(s)]
 
     # running-balance offsets (bank running balance vs Actual's balance after that day)
     offsets = []
@@ -278,7 +273,7 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
         base = offsets[0]["offset"]
         first_divergence = next((o for o in offsets[1:] if o["offset"] != base), None)
 
-    effects = [(f"import:{s['imported_id']}", _cents(s)) for s in missing] + \
+    effects = [(f"import:{s['imported_id']}", signed_cents(s)) for s in missing] + \
               [(f"delete:{a['id']}", -a["amount"]) for a in extra]
     exact = subset_to_target(effects, gap) if gap not in (None, 0) else ([] if gap == 0 else None)
 
@@ -309,7 +304,7 @@ def analyse(account_id: str, info: StatementInfo, statement_rows: list[dict],
 
 
 def _brief_s(s: dict) -> dict:
-    return {"imported_id": s.get("imported_id"), "date": s["date"], "amount": _cents(s),
+    return {"imported_id": s.get("imported_id"), "date": s["date"], "amount": signed_cents(s),
             "payee": s.get("payee"), "description": s.get("description")}
 
 
@@ -335,7 +330,7 @@ def recommend(r: dict, missing: list[dict], extra: list[dict]) -> list[dict]:
         plans.append({"fix_type": "import_missing", "title": f"Import {len(missing)} transaction(s) the bank has but Actual doesn't",
                       "why": "in the statement period, not found in Actual by bank reference or date+amount",
                       "actions": [{"type": "import", "account": acct, "transactions": missing}],
-                      "effect": sum(_cents(s) for s in missing)})
+                      "effect": sum(signed_cents(s) for s in missing)})
     explained = sum(p["effect"] for p in plans)
     gap = r["gap"]
     if gap is not None and gap != explained and not r["balance_reliable"]:
@@ -458,7 +453,7 @@ def agent_tools(report: dict, statement_rows: list[dict], extra_rows: list[dict]
         if import_ids:
             rows = [stmt_by_id[i] for i in import_ids if i in stmt_by_id]
             actions.append({"type": "import", "account": report["account"], "transactions": rows})
-            effect += sum(_cents(r) for r in rows)
+            effect += sum(signed_cents(r) for r in rows)
         if delete_ids:
             actions.append({"type": "delete", "ids": list(delete_ids)})
             effect -= sum(extra_by_id[i]["amount"] for i in delete_ids if i in extra_by_id)
@@ -525,8 +520,10 @@ def agent(report: dict, statement_rows: list[dict], llm) -> dict:
 
 def run(account_id: str, info: StatementInfo, statement_rows: list[dict], balance: float | None = None,
         as_of: str | None = None, use_llm: bool = True, statement_date: str | None = None,
-        gateway=None) -> dict:
+        gateway=None, bank_balance: float | None = None) -> dict:
     """Fetch what analyse() needs through the Actual gateway, explain the gap, queue fixes.
+    balance: signed as Actual shows it. bank_balance instead: as the bank shows it (a card: what you
+    owe, positive) — whether the account is a card is then decided here (accounts.is_card).
     → {report, explanation, queued, engine}"""
     import actual_gateway
     from llm import LLMCategorizer
@@ -536,11 +533,18 @@ def run(account_id: str, info: StatementInfo, statement_rows: list[dict], balanc
     rows, accts = gateway.txns(EPOCH, as_of, [account_id])
     others, _ = gateway.txns(start, as_of)
     others = [t for t in others if t["account"] != account_id]
-    name = next((a["name"] for a in accts if a["id"] == account_id), account_id)
+    account = next((a for a in accts if a["id"] == account_id), None)
+    name = account["name"] if account else account_id
+    if bank_balance is not None and balance is None:
+        card = is_card(account, info=info)
+        if info.kind == "unknown":
+            info.kind = CARD if card else "deposit"
+        balance = balance_cents(float(bank_balance), card) / 100
     if statement_date:      # cards keep a fixed statement day — remember it for next time
         remember_cycle_day(account_id, statement_date)
     report = analyse(account_id, info, statement_rows, rows, balance, as_of, name, others,
                      statement_date=statement_date, cycle_day=cycle_day(account_id))
+    report["kind"] = info.kind
     llm = LLMCategorizer() if use_llm else None
     if llm is not None and llm.enabled and not report["reconciled"]:
         try:

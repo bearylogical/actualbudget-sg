@@ -105,10 +105,12 @@ def test_hunt_skips_pairs_you_already_decided(tmp_path):
 
 
 def test_hunt_route_runs_end_to_end(monkeypatch):
-    """POST /review/hunt wires the bridge rows, account last-4s and the LLM into hunt.run."""
+    """POST /review/hunt wires the gateway's rows, the remembered account last-4s and the LLM into hunt.run."""
     from fastapi.testclient import TestClient
+    import accounts as acct
+    import actual_gateway
     import main
-    import bridge_client
+    from fake_actual import FakeActual
 
     class FakeLLM:
         enabled, model = True, "fake"
@@ -121,8 +123,10 @@ def test_hunt_route_runs_end_to_end(monkeypatch):
                 "window": {"start": window[0], "end": window[1]}}
 
     monkeypatch.setattr(main, "LLMCategorizer", FakeLLM)
-    monkeypatch.setattr(bridge_client, "txns", lambda s, e, a=None: (ROWS, [{"id": "card", "name": "CARD"}]))
-    monkeypatch.setattr(main, "_account_last4", lambda: {"card": "2583"})
+    gw = FakeActual(accounts=[{"id": "card", "name": "CARD"}])
+    gw.rows = [dict(r) for r in ROWS]
+    monkeypatch.setattr(actual_gateway, "_default", gw)
+    acct.remember("UOB|credit_card|2583", "card", "CARD")
     monkeypatch.setattr(hunt, "run", fake_run)
     r = TestClient(main.app).post("/review/hunt", json={"start": "2026-09-01", "end": "2026-09-30",
                                                         "instructions": "Grab"})

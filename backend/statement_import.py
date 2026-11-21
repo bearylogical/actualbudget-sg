@@ -177,7 +177,7 @@ def preview(sid: str, account_id: str | None = None, *, use_llm: bool = True, re
     names = {a["id"]: a.get("name", a["id"]) for a in match_rows}
     guard = acct.cross_account_conflict(chosen, rows, counts, names) if chosen and connected else None
 
-    hist = history.get(ctx, refresh)
+    hist = history.get(ctx, refresh, gateway=gateway)
     enriched = enrich(rows, ctx, account_id=chosen, use_llm=use_llm, history=hist)
     txns = _apply_categories(enriched["transactions"], categories, ctx)
 
@@ -242,7 +242,7 @@ def commit(sid: str, account_id: str, *, categories: dict | None = None,
     if p.get("account_id") == account_id and p.get("use_llm") == use_llm and p.get("transactions"):
         base, stats = p["transactions"], p.get("stats")
     else:
-        e = enrich(rows, ctx, account_id=account_id, use_llm=use_llm, history=history.get(ctx))
+        e = enrich(rows, ctx, account_id=account_id, use_llm=use_llm, history=history.get(ctx, gateway=gateway))
         base, stats = e["transactions"], e["stats"]
     leave_out = set(exclude or [])
     txns = [t for t in _apply_categories(base, categories, ctx) if t["imported_id"] not in leave_out]

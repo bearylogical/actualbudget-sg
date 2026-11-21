@@ -21,6 +21,7 @@ your history says how you categorise that person.
 """
 from __future__ import annotations
 
+import money
 from actual_rules import ActualContext, apply_rules
 from categorizer import UNCATEGORIZED, categorize
 from llm import LLMCategorizer
@@ -79,14 +80,13 @@ def enrich(transactions: list[dict], ctx: ActualContext | None = None, *,
 
         # 1. Actual rules
         if ctx is not None:
-            amount_cents = round(abs(float(t.get("amount", 0))) * 100)
             p = ctx.payee_by_name.get(str(t["payee"]).strip().lower())
             res = apply_rules({
                 "imported_payee": t.get("description", ""),
                 "payee": t["payee"],
                 "payee_id": p["id"] if p else None,
                 "notes": "",
-                "amount_cents": amount_cents if t.get("is_credit") else -amount_cents,
+                "amount_cents": money.signed_cents(t),
                 "account_id": account_id,
             }, ctx)
             if res["payee"]:

@@ -5,6 +5,7 @@ import fs from 'fs';
 // Import path matches where it lives in that image
 import * as api from '@actual-app/api';
 import { classify } from './dedup.js';
+import { buildActualTxn, isActualRow } from './rows.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -50,10 +51,6 @@ async function ensureInit(serverURL, password) {
     initializedForPassword = password;
     budgetLoaded = false;
   }
-}
-
-function toActualAmount(float) {
-  return Math.round(float * 100);
 }
 
 function requireBudget(res) {
@@ -468,14 +465,18 @@ app.post('/txns/add', (req, res) => serialised(async () => {
 app.post('/txns/update', (req, res) => serialised(async () => {
   if (!requireBudget(res)) return;
   const { updates = [] } = req.body || {};
-  const result = { updated: 0, errors: [] };
+  // failed: [{ id, error }] per row, so the backend can settle each item on its own outcome
+  const result = { updated: 0, errors: [], failed: [] };
   for (const u of updates) {
     try {
       const fields = { category: u.category };
       if ('notes' in u) fields.notes = u.notes;
       await api.updateTransaction(u.id, fields);
       result.updated++;
-    } catch (e) { result.errors.push(`${u.id}: ${errMsg(e)}`); }
+    } catch (e) {
+      result.errors.push(`${u.id}: ${errMsg(e)}`);
+      result.failed.push({ id: u.id, error: errMsg(e) });
+    }
   }
   await api.sync();
   res.json({ ok: true, ...result });
@@ -593,31 +594,6 @@ app.get('/budget-month/:month', async (req, res) => {
   }
 });
 
-function buildActualTxn(t, payeeByName) {
-  // Clean payee name (backend/payees.py) so Actual's per-payee learning works;
-  // the raw statement text is kept in imported_payee for rules and auditing.
-  const payeeName = (t.payee || t.description || '').trim();
-  const existingPayeeId = payeeByName.get(payeeName.toLowerCase());
-  const txn = {
-    date: t.date,
-    amount: t.is_credit ? toActualAmount(t.amount) : -toActualAmount(t.amount),
-    imported_payee: t.description,
-    notes: t.notes || '',
-    imported_id: t.imported_id || undefined,
-    cleared: true,
-    ...(t.category_id ? { category: t.category_id } : {}),
-    ...(existingPayeeId ? { payee: existingPayeeId } : { payee_name: payeeName }),
-  };
-  if (Array.isArray(t.splits) && t.splits.length > 1) {
-    txn.subtransactions = t.splits.map(s => ({
-      amount: -toActualAmount(Number(s.amount) || 0),
-      ...(s.category_id ? { category: s.category_id } : {}),
-      notes: s.notes || '',
-    }));
-  }
-  return txn;
-}
-
 // One import at a time: the scheduler and the UI share this bridge, and two
 // concurrent imports of the same file could both pass the duplicate check.
 let importQueue = Promise.resolve();
@@ -633,9 +609,16 @@ app.post('/import', (req, res) => serialised(() => importHandler(req, res)));
 
 async function importHandler(req, res) {
   if (!requireBudget(res)) return;
-  const { accountId, transactions, dryRun = false, verified = {}, reimportDeleted } = req.body;
+  // `rows` are Actual rows in signed cents (backend/money.py to_actual). The old body key
+  // `transactions` (abs amount + is_credit) is refused rather than guessed at, so a backend and
+  // bridge from different versions fail loudly instead of importing with the wrong sign.
+  const { accountId, rows: transactions, dryRun = false, verified = {}, reimportDeleted } = req.body;
   if (!accountId || !Array.isArray(transactions)) {
-    return res.status(400).json({ error: 'accountId and transactions[] required' });
+    return res.status(400).json({ error: 'accountId and rows[] (signed-cents Actual rows) required' });
+  }
+  const bad = transactions.findIndex(t => !isActualRow(t));
+  if (bad >= 0) {
+    return res.status(400).json({ error: `rows[${bad}] is not an Actual row: amounts must be signed integer cents` });
   }
   try {
     // Fetch existing transactions for the incoming date range (padded ±7 days) to
@@ -693,7 +676,7 @@ async function importHandler(req, res) {
       addedIds: result.added ?? [],   // lets the UI undo this import
       skipped,
       unreviewed: needsVerify.filter(t => verified[t.imported_id] !== 'import')
-        .map(t => ({ imported_id: t.imported_id, date: t.date, description: t.description, amount: t.amount, reason: t.reason })),
+        .map(t => ({ imported_id: t.imported_id, date: t.date, imported_payee: t.imported_payee, amount: t.amount, reason: t.reason })),
       errors: result.errors ?? [],
     });
   } catch (e) {

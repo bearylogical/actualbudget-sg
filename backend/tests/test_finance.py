@@ -258,3 +258,120 @@ def test_ghostfolio_delete_activity(monkeypatch):
     import pytest
     with pytest.raises(ghostfolio.GhostfolioError):
         ghostfolio.delete_activity("nope", transport=t)
+
+
+# ── the Snapshot, driven against FakeActual ──
+
+import pytest
+
+from actual_gateway import GatewayError
+from fake_actual import FakeActual
+
+
+def fake_budget() -> FakeActual:
+    fa = FakeActual(
+        accounts=[{"id": "sav", "name": "UOB One Account"}, {"id": "card", "name": "UOB One Card"},
+                  {"id": "cpf", "name": "CPF OA", "offbudget": True}],
+        categories=[{"id": "din", "name": "Dining", "group_name": "Spend"},
+                    {"id": "shop", "name": "Shopping", "group_name": "Spend"},
+                    {"id": "sal", "name": "Salary", "group_name": "Income", "is_income": True}])
+    fa.today = "2026-09-15"
+    fa.add("sav", "2026-06-20", 1_000_000, "Opening", starting_balance_flag=True)
+    fa.add("cpf", "2026-06-20", 5_000_000, "Opening", starting_balance_flag=True)
+    for mo in ("06", "07", "08"):
+        fa.add("sav", f"2026-{mo}-25", 800_000, "ACME PTE LTD", category="sal")
+        fa.add("card", f"2026-{mo}-10", -60_000, "Ya Kun", category="din")
+        fa.add("card", f"2026-{mo}-12", -20_000, "Uniqlo", category="shop")
+        fa.add("sav", f"2026-{mo}-28", -200_000, "Rent", category="shop")
+    fa.add("card", "2026-09-10", -25_000, "Ya Kun", category="din")
+    fa.add("card", "2026-09-12", -60_000, "Uniqlo", category="shop")
+    fa.add("card", "2026-09-13", -3_000, "Mystery")                                  # uncategorised
+    fa.add("sav", "2026-09-14", -50_000, "To card", transfer_id="x1")                # a transfer, not spend
+    fa.add("card", "2026-09-14", 50_000, "From savings", transfer_id="x2")
+    return fa
+
+
+def snapshot(fa, **kw) -> finance.Snapshot:
+    kw.setdefault("today", lambda: date(2026, 9, 15))
+    return finance.Snapshot(fa, **kw)
+
+
+def test_snapshot_summary_composes_actual_ghostfolio_and_review():
+    fa = fake_budget()
+    s = snapshot(fa, ghost=lambda: {"configured": True, "value": 1_000.0},
+                 card_ids=lambda: {"card"}, review_counts=lambda: {"pending": 2}).summary(6)
+    assert s["as_of"] == "2026-09-15"
+    sav = 1_000_000 + 3 * (800_000 - 200_000) - 50_000
+    card = -3 * 80_000 - 88_000 + 50_000
+    assert s["cash"] == sav and s["card_owed"] == -card and s["offbudget"] == 5_000_000
+    assert s["investments"] == 100_000 and s["net_worth"] == sav + card + 5_000_000 + 100_000
+    assert s["baseline_months"] == ["2026-07", "2026-08"]                  # partial June skipped
+    assert s["avg_spend"] == 280_000 and s["avg_income"] == 800_000
+    assert s["month"]["spent"] == 85_000              # budget-month spending: no transfer, no uncategorised row
+    assert s["uncategorised"] == {"count": 1, "amount": -3_000} and s["review_pending"] == 2
+    assert [c["name"] for c in s["categories"]] == ["Shopping", "Dining"]
+
+
+def test_snapshot_week_names_categories_and_skips_transfers():
+    w = snapshot(fake_budget()).week(7)
+    assert (w["from"], w["to"]) == ("2026-09-09", "2026-09-15")
+    assert w["spent"] == 88_000 and w["transactions"] == 3
+    assert {c["category"]: c["spent"] for c in w["categories"]} == {"Shopping": 60_000, "Dining": 25_000,
+                                                                     "Uncategorised": 3_000}
+    assert w["usual_week"] == round((20_000 + 200_000) / 4)                 # Aug 12 + 28; Aug 10 is before the baseline
+
+
+def test_snapshot_transactions_defaults_and_validation():
+    snap = snapshot(fake_budget())
+    r = snap.transactions(kind="spend")
+    assert (r["from"], r["to"]) == ("2026-08-17", "2026-09-15")
+    assert r["count"] == 4 and r["money_out"] == 288_000                    # Aug rent + 3 September card rows
+    assert r["transactions"][0]["payee"] == "Mystery" and r["transactions"][0]["category"] == "Uncategorised"
+    assert snap.transactions(category="dining", start="2026-01-01")["count"] == 4
+    for bad in ({"start": "15/09/2026"}, {"start": "2026-09-20"}, {"kind": "refund"}):
+        with pytest.raises(ValueError):
+            snap.transactions(**bad)
+
+
+def test_snapshot_trends_works_balances_back_from_today():
+    t = snapshot(fake_budget()).trends(3)
+    assert [m["month"] for m in t["months"]] == ["2026-07", "2026-08", "2026-09"]
+    jul, sep = t["months"][0], t["months"][-1]
+    assert jul["income"] == 800_000 and jul["spent"] == 280_000 and not jul["partial"] and sep["partial"]
+    assert jul["balance_end"]["off_budget"] == 5_000_000
+    assert jul["balance_end"]["on_budget"] == 1_000_000 + 2 * (800_000 - 280_000)
+
+
+def test_snapshot_weekly_and_gateway_errors():
+    fa = fake_budget()
+    w = snapshot(fa, review_counts=lambda: {"pending": 1, "transfer_pair": {"pending": 1}}).weekly()
+    assert set(w) == {"week", "summary", "review"} and w["review"]["pending"] == 1
+    assert w["summary"]["review_pending"] == 1 and w["week"]["spent"] == 88_000
+    fa.loaded = False
+    with pytest.raises(GatewayError):
+        snapshot(fa).summary()
+
+
+def test_finance_routes_go_through_the_snapshot(monkeypatch):
+    from fastapi.testclient import TestClient
+    import actual_gateway
+    import health
+    import main
+
+    fa = fake_budget()
+    monkeypatch.setattr(actual_gateway, "default", lambda: fa)
+    monkeypatch.setattr(ghostfolio, "summary", lambda: {"configured": False})
+
+    async def fake_health(url, refresh_llm=False):
+        return {"status": "ok", "components": {"bridge": {"status": "ok"}}}
+    monkeypatch.setattr(health, "full_report", fake_health)
+    c = TestClient(main.app)
+
+    r = c.get("/finance/weekly")
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == {"week", "summary", "review", "health"}
+    assert c.get("/finance/summary").json()["as_of"] == "2026-09-15"
+    assert c.get("/finance/trends?months=2").status_code == 200
+    assert c.get("/finance/transactions?kind=nope").status_code == 400
+    fa.loaded = False
+    assert c.get("/finance/week").status_code == 400   # no budget → "connect first" (the shared gateway handler)

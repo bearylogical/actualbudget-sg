@@ -41,6 +41,7 @@ AUTO_MIN_SCORE = 0.6     # top suggestion must score at least this …
 AUTO_MIN_MARGIN = 0.25   # … and beat the runner-up by this much to be auto-selected
 
 CARD_WORDS = ("card", "credit", "visa", "master", "amex", "krisflyer", "one card", "cashback")
+CARD = "credit_card"
 DEPOSIT_WORDS = ("saving", "savings", "current", "account", "everyday", "esaver", "one account",
                  "multiplier", "360", "checking", "debit")
 BANK_ALIASES = {"UOB": ("uob",), "DBS/POSB": ("posb", "dbs"), "OCBC": ("ocbc",)}
@@ -79,6 +80,39 @@ class StatementInfo:
         d = d or {}
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# ── card-ness: the one rule ──────────────────────────────────────────────────
+
+def name_looks_like_card(name: str | None) -> bool:
+    return any(w in (name or "").lower() for w in CARD_WORDS)
+
+
+def card_account_ids() -> set[str]:
+    """Actual accounts a credit-card Statement was ever imported into (the remembered fingerprints)."""
+    return {v["account_id"] for fp, v in load_map().items() if f"|{CARD}|" in fp and v.get("account_id")}
+
+
+def is_card(account: dict | None = None, info: StatementInfo | None = None,
+            card_ids: set[str] | None = None) -> bool:
+    """Is this a credit card (its balance is what you owe)? A Statement decides by its kind or its
+    printed owed balance; failing that, an Actual account is a card if a card Statement was imported
+    into it, else by its name. card_ids defaults to card_account_ids()."""
+    if info is not None:
+        if info.kind == CARD or info.balance_is_owed:
+            return True
+        if info.kind == "deposit":
+            return False
+    if not account:
+        return False
+    ids = card_account_ids() if card_ids is None else card_ids
+    return account.get("id") in ids or name_looks_like_card(account.get("name"))
+
+
+def balance_cents(balance: float, card: bool) -> int:
+    """A balance as the bank prints it → Actual's signed cents. Cards print what you owe."""
+    c = round(balance * 100)
+    return -c if card else c
 
 
 def _money(v) -> float | None:
@@ -292,7 +326,7 @@ def recommend(info: StatementInfo, transactions: list[dict], accounts: list[dict
 
         bal = a.get("balance")
         if info.balance is not None and bal is not None:
-            expected = -round(info.balance * 100) if info.balance_is_owed else round(info.balance * 100)
+            expected = balance_cents(info.balance, is_card(info=info))
             if abs(bal - expected) <= 1:
                 score += 0.5
                 reasons.append(f"balance matches the statement ({info.balance:,.2f})")
@@ -307,7 +341,7 @@ def recommend(info: StatementInfo, transactions: list[dict], accounts: list[dict
         if type_phrase and type_phrase in " ".join(re.findall(r"[a-z0-9]+", name)):
             score += 0.3
             reasons.append(f"name matches “{info.account_type}”")
-        is_cardish = any(w in name for w in CARD_WORDS)
+        is_cardish = name_looks_like_card(name)
         is_depositish = any(w in name for w in DEPOSIT_WORDS) and not is_cardish
         if info.kind == "credit_card":
             if is_cardish:
