@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -16,6 +16,7 @@ from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
 import connection
 import import_log
+import actual_gateway
 import bridge_client
 import review_scan
 import statement_import as si
@@ -33,25 +34,32 @@ app.add_middleware(
 )
 
 
-async def get_context() -> ActualContext | None:
-    """Live categories/payees/rules from the loaded Actual budget, or None."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(f"{BRIDGE_URL}/context")
-        if r.is_success:
-            return ActualContext.from_bridge(r.json())
-    except httpx.HTTPError:
-        pass
-    return None
+def gateway() -> actual_gateway.HttpGateway:
+    """The Actual gateway every route reaches Actual through (tests swap actual_gateway._default)."""
+    return actual_gateway.default()
+
+
+@app.exception_handler(actual_gateway.GatewayError)
+async def _gateway_error(_: Request, e: actual_gateway.GatewayError):
+    """One mapping for every route: no budget → 400 (connect first), timeout → 504,
+    bridge unreachable or failing → 502, the bridge refusing the request (4xx) → that status."""
+    if e.no_budget:
+        code, detail = 400, "No Actual budget loaded — connect and load a budget first"
+    elif e.timeout:
+        code, detail = 504, str(e)
+    elif e.status is None:
+        code, detail = 502, f"{e} — is actual-bridge running? `docker compose logs actual-bridge`"
+    elif 400 <= e.status < 500:
+        code, detail = e.status, str(e)
+    else:
+        code, detail = 502, str(e)
+    return JSONResponse({"detail": detail}, status_code=code)
 
 
 async def require_context() -> ActualContext:
-    ctx = await get_context()
-    if ctx is None:
-        raise HTTPException(
-            400, "No Actual budget loaded — connect and load a budget first"
-        )
-    return ctx
+    """Live categories/payees/rules from the loaded Actual budget (reloading it after a bridge
+    restart). No budget → GatewayError → 400."""
+    return ActualContext.from_bridge(await run_in_threadpool(gateway().context))
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -281,40 +289,20 @@ async def export_csv(data: dict):
 # ── Actual Budget bridge proxy ────────────────────────────────────────────────
 
 
-async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30, _retry: bool = True):
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if method == "GET":
-                r = await client.get(f"{BRIDGE_URL}{path}")
-            else:
-                r = await client.post(f"{BRIDGE_URL}{path}", json=body or {})
-    except httpx.TimeoutException:
-        raise HTTPException(504, f"actual-bridge did not answer within {timeout}s — it may be stuck "
-                                 "reaching your Actual server (DNS / TLS / firewall from inside Docker?)")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Can't reach actual-bridge at {BRIDGE_URL} ({type(e).__name__}) — "
-                                 "is the container running? `docker compose logs actual-bridge`")
-    if not r.is_success:
-        try:
-            detail = r.json().get("error", r.text)
-        except ValueError:
-            detail = r.text
-        # bridge restarted and lost its in-memory budget → reload the saved connection, retry once
-        if _retry and bridge_client.is_no_budget(r.status_code, detail) \
-                and await run_in_threadpool(bridge_client.reload_saved_budget):
-            return await _bridge(method, path, body, timeout, _retry=False)
-        raise HTTPException(r.status_code, detail)
-    return r.json()
+async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30):
+    """Deprecated raw call, kept only for the routes not yet on the gateway (/rules/sync,
+    /review/recategorize/apply-many). New code: add a method to actual_gateway.HttpGateway."""
+    return await run_in_threadpool(bridge_client.call, method, path, body, timeout)
 
 
 @app.post("/actual/budgets")
 async def actual_list_budgets(body: dict):
-    return await _bridge("POST", "/budgets", body)
+    return {"budgets": await run_in_threadpool(gateway().budgets, body)}
 
 
 @app.post("/actual/budgets/load")
 async def actual_load_budget(body: dict):
-    data = await _bridge("POST", "/budgets/load", body, timeout=60)
+    data = await run_in_threadpool(gateway().load_budget, body)
     # Share this connection with the scheduler (see connection.py) so it needs no compose config
     try:
         connection.save(body)
@@ -331,42 +319,44 @@ async def scheduler_connection():
 
 @app.get("/actual/accounts")
 async def actual_accounts():
-    return await _bridge("GET", "/accounts")
+    return {"accounts": await run_in_threadpool(gateway().list_accounts)}
 
 
 @app.get("/actual/categories")
 async def actual_categories():
-    return await _bridge("GET", "/categories")
+    return {"categoryGroups": await run_in_threadpool(gateway().category_groups)}
 
 
 @app.post("/actual/categories")
 async def actual_create_category(body: dict):
-    return await _bridge("POST", "/categories", body)
+    """{name, groupId? | groupName?}"""
+    if not body.get("name"):
+        raise HTTPException(400, "name required")
+    return await run_in_threadpool(gateway().create_category, body["name"], body.get("groupId"),
+                                   body.get("groupName"))
 
 
 @app.get("/actual/payees")
 async def actual_payees():
-    return await _bridge("GET", "/payees")
+    return {"payees": await run_in_threadpool(gateway().list_payees)}
 
 
 @app.get("/actual/rules")
 async def actual_rules():
-    return await _bridge("GET", "/rules")
+    return {"rules": await run_in_threadpool(gateway().list_rules)}
 
 
 @app.post("/actual/rules")
 async def actual_create_rules(body: dict):
-    return await _bridge("POST", "/rules", body)
-
-
-@app.post("/actual/preview")
-async def actual_preview(body: dict):
-    return await _bridge("POST", "/preview", body)
+    """{mappings: [{description, categoryId}]} → {created}: one "payee is X → category" rule each."""
+    mappings = [{"payee": m["description"], "category_id": m["categoryId"]}
+                for m in body.get("mappings") or [] if m.get("description") and m.get("categoryId")]
+    return {"ok": True, "created": await run_in_threadpool(gateway().create_rules, mappings)}
 
 
 @app.get("/actual/budget-month/{month}")
 async def actual_budget_month(month: str):
-    return await _bridge("GET", f"/budget-month/{month}")
+    return await run_in_threadpool(gateway().budget_month, month)
 
 
 @app.post("/actual/reset")
@@ -376,7 +366,8 @@ async def actual_reset():
         connection.clear()
     except Exception as e:
         print(f"[connection] could not clear scheduler config: {e}")
-    return await _bridge("POST", "/reset")
+    await run_in_threadpool(gateway().disconnect)
+    return {"ok": True}
 
 
 # ── Review queue (duplicates / transfers / reconciliation fixes) ─────────────
@@ -385,8 +376,6 @@ from datetime import date as _date, timedelta as _td
 
 
 _apply = review_scan.apply_item
-scan_and_queue = review_scan.scan_and_queue
-_account_last4 = review_scan.account_last4   # bound here: the review_scan route below shadows the module
 
 
 def recategorize_scan(start: str, end: str, mode: str = "uncategorised", use_llm: bool = True,
@@ -456,16 +445,12 @@ async def review_counts():
 
 
 @app.post("/review/scan")
-async def review_scan(body: dict | None = None):
+async def review_scan_route(body: dict | None = None):
     """{days: 90} or {start, end, account_ids}"""
     body = body or {}
     end = body.get("end") or _date.today().isoformat()
     start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 90)))).isoformat()
-    try:
-        res = await run_in_threadpool(scan_and_queue, start, end, body.get("account_ids"))
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    return res
+    return await run_in_threadpool(review_scan.scan_and_queue, start, end, body.get("account_ids"), gateway())
 
 
 @app.post("/review/{item_id}/decide")
@@ -478,15 +463,14 @@ async def review_decide(item_id: str, body: dict):
             raise HTTPException(404, "no such item")
         if it["kind"] != "recategorize":
             raise HTTPException(400, "category_id only applies to recategorize items")
-        ctx = ActualContext.from_bridge(await _bridge("GET", "/context"))
-        _override_category(it, ctx, body["category_id"])
+        _override_category(it, await require_context(), body["category_id"])
     try:
         item = review.decide(item_id, body.get("decision", ""), by="you")
     except KeyError:
         raise HTTPException(404, "no such item")
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return await run_in_threadpool(_apply, item)
+    return await run_in_threadpool(review_scan.apply_item, item, gateway())
 
 
 def _override_category(it: dict, ctx: ActualContext, category_id: str):
@@ -599,12 +583,9 @@ async def review_hunt(body: dict | None = None):
     body = body or {}
     end = body.get("end") or _date.today().isoformat()
     start = body.get("start") or (_date.fromisoformat(end) - _td(days=int(body.get("days", 90)))).isoformat()
+    rows, accts = await run_in_threadpool(gateway().txns, start, end, body.get("account_ids"))
     try:
-        rows, accts = await run_in_threadpool(bridge_client.txns, start, end, body.get("account_ids"))
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    try:
-        res = await run_in_threadpool(hunt.run, rows, accts, (start, end), llm, _account_last4(),
+        res = await run_in_threadpool(hunt.run, rows, accts, (start, end), llm, review_scan.account_last4(),
                                       str(body.get("instructions") or ""))
     except httpx.HTTPError as e:
         raise HTTPException(502, f"LLM request failed: {e}")
@@ -659,13 +640,9 @@ async def reconcile_account(body: dict):
         except ValueError:
             raise HTTPException(400, "statement_date must be YYYY-MM-DD")
     info = acct.StatementInfo.from_dict(body.get("statement"))
-    try:
-        res = await run_in_threadpool(recon_run, body["account_id"], info, body.get("transactions") or [],
-                                      body.get("balance"), body.get("as_of"), body.get("use_llm", True),
-                                      body.get("statement_date") or None)
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
-    return res
+    return await run_in_threadpool(recon_run, body["account_id"], info, body.get("transactions") or [],
+                                   body.get("balance"), body.get("as_of"), body.get("use_llm", True),
+                                   body.get("statement_date") or None, gateway())
 
 
 # ── Import history ───────────────────────────────────────────────────────────

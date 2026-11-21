@@ -1,6 +1,7 @@
 import review
 import recategorize
 import bridge_client
+import review_scan
 from actual_rules import ActualContext
 
 CATS = [
@@ -51,9 +52,9 @@ def test_update_strips_review_tag_and_learning_pattern(monkeypatch):
          "current": {"id": None, "name": None},
          "proposed": {"id": "c-tpt", "name": "Transport", "source": "llm", "confidence": 0.9}, "reason": "x"}
     assert recategorize.update_for(p) == {"id": "t1", "category": "c-tpt", "notes": "#llm"}
-    assert bridge_client.actions_for({"kind": "recategorize", "decision": "apply", "payload": p}) == \
+    assert review_scan.actions_for({"kind": "recategorize", "decision": "apply", "payload": p}) == \
         [{"type": "categorize", "updates": [{"id": "t1", "category": "c-tpt", "notes": "#llm"}]}]
-    assert bridge_client.actions_for({"kind": "recategorize", "decision": "keep", "payload": p}) == []
+    assert review_scan.actions_for({"kind": "recategorize", "decision": "keep", "payload": p}) == []
 
     # two identical approvals for the same payee → the third proposal resolves itself
     for i in (1, 2):

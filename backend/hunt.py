@@ -322,7 +322,7 @@ def tools(rows: list[dict], accounts: list[dict], window: tuple[str, str],
 
 def run(rows: list[dict], accounts: list[dict], window: tuple[str, str], llm,
         account_last4: dict[str, str] | None = None, instructions: str = "", max_steps: int = 20) -> dict:
-    """Run the hunt agent over `rows` (from bridge_client.txns). Returns what it queued and flagged."""
+    """Run the hunt agent over `rows` (from the Actual gateway's txns). Returns what it queued and flagged."""
     from llm import run_tools
     specs, handlers, state = tools(rows, accounts, window, account_last4, source=f"llm:{llm.model}")
     ask = (f"Audit Actual from {window[0]} to {window[1]} for duplicates and unreconciled transfers. "

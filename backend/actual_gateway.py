@@ -1,12 +1,17 @@
 """
-The Actual gateway: what the backend and the scheduler need from the loaded Actual budget.
+The Actual gateway: the one seam the backend and the scheduler use to reach Actual.
+
+Nothing else talks to actual-bridge (bridge_client is this module's transport). Routes call
+default(); modules take a gateway= argument so tests can hand them FakeActual.
 
 One interface, two adapters:
   HttpGateway   talks to actual-bridge (production). Reloads the saved connection when the
                 bridge has lost its budget (bridge restart), so callers never see that case.
   FakeActual    in-memory, for tests (backend/tests/fake_actual.py).
 
-Every method raises GatewayError when Actual can't be reached or refuses the request.
+Every method raises GatewayError when Actual can't be reached or refuses the request
+(.status = the bridge's HTTP status or None, .timeout, .no_budget). main.py maps it to an HTTP
+error once, for every route.
 Amounts in Actual rows are signed integer cents (money in > 0).
 """
 from __future__ import annotations
@@ -57,6 +62,43 @@ class HttpGateway:
         """mappings: [{payee, category_id}] → number of "payee is X → category" rules created."""
         body = {"mappings": [{"description": m["payee"], "categoryId": m["category_id"]} for m in mappings]}
         return int(bridge_client.call("POST", "/rules", body, timeout=60).get("created") or 0)
+
+    # ── connection (the UI's Actual sidebar) ──
+    def budgets(self, credentials: dict) -> list[dict]:
+        """credentials: {serverURL, password} → the budgets on that Actual server."""
+        return bridge_client.call("POST", "/budgets", credentials, timeout=30).get("budgets", [])
+
+    def load_budget(self, credentials: dict) -> dict:
+        """credentials: {serverURL, password, budgetId, encryptionPassword?} → {accounts, categoryGroups, payees, rules}."""
+        return bridge_client.call("POST", "/budgets/load", credentials, timeout=60)
+
+    def disconnect(self) -> None:
+        bridge_client.call("POST", "/reset", {}, timeout=30)
+
+    # ── budget reads for the UI ──
+    def list_accounts(self) -> list[dict]:
+        """Every account with its balance (signed cents)."""
+        return bridge_client.call("GET", "/accounts", timeout=30).get("accounts", [])
+
+    def category_groups(self) -> list[dict]:
+        """[{id, name, is_income, categories: [...]}]"""
+        return bridge_client.call("GET", "/categories", timeout=30).get("categoryGroups", [])
+
+    def create_category(self, name: str, group_id: str | None = None, group_name: str | None = None) -> dict:
+        """Create a category in group_id, or in group_name (created if missing) → {id, name, group_id}."""
+        body = {"name": name, "groupId": group_id, "groupName": group_name}
+        return bridge_client.call("POST", "/categories", body, timeout=30)
+
+    def list_payees(self) -> list[dict]:
+        return bridge_client.call("GET", "/payees", timeout=30).get("payees", [])
+
+    def list_rules(self) -> list[dict]:
+        """Actual-format rules."""
+        return bridge_client.call("GET", "/rules", timeout=30).get("rules", [])
+
+    def budget_month(self, month: str) -> dict:
+        """month "YYYY-MM" → {budget, categoryGroups}."""
+        return bridge_client.call("GET", f"/budget-month/{month}", timeout=30)
 
 
 _default = HttpGateway()

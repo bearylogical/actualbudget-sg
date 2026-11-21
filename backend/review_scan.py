@@ -1,9 +1,12 @@
-"""Scan Actual for duplicates and unlinked transfers, queue them, and apply approved review items."""
+"""Scan Actual for duplicates and unlinked transfers, queue them, and apply approved review items.
+
+Review policy lives here: which Actual actions a decided item means (actions_for), which other
+items it makes moot (touched_ids), and whether Actual really did what was asked (an import that
+added fewer rows than approved fails the item). The gateway only carries the actions out."""
 from __future__ import annotations
 
 import accounts as acct
 import actual_gateway
-import bridge_client
 import review
 
 
@@ -17,15 +20,62 @@ def account_last4() -> dict[str, str]:
     return out
 
 
+def actions_for(item: dict) -> list[dict]:
+    """Translate a decided review item into gateway actions (see HttpGateway.apply_actions)."""
+    kind, d, p = item["kind"], item["decision"], item["payload"]
+    if kind == "import_duplicate":
+        return [{"type": "import", "account": p["account"], "transactions": [p["incoming"]]}] if d == "import" else []
+    if kind == "existing_duplicate":
+        if d in ("delete_a", "delete_b"):
+            return [{"type": "delete", "ids": [p["a" if d == "delete_a" else "b"]["id"]]}]
+        return []
+    if kind == "transfer_pair":
+        if d != "link":
+            return []
+        a, b = p["a"], p["b"]
+        return [{"type": "link", "keep_id": a["id"], "other_id": b["id"], "keep_account": a["account"],
+                 "other_account": b["account"], "date": a["date"]}]
+    if kind == "reconcile_fix":
+        return p["actions"] if d == "apply" else []
+    if kind == "recategorize":
+        from recategorize import update_for
+        return [{"type": "categorize", "updates": [update_for(p)]}] if d == "apply" else []
+    raise ValueError(kind)
+
+
+def touched_ids(actions: list[dict]) -> set[str]:
+    """Actual transaction ids these actions change — other items about them are now moot."""
+    ids = set()
+    for a in actions:
+        ids.update(a.get("ids") or [])
+        ids.update(x for x in (a.get("keep_id"), a.get("other_id")) if x)
+    return ids
+
+
+def _check_imports(actions: list[dict], result: dict) -> dict:
+    """An approved import that Actual only partly took (e.g. skipped as a duplicate) is a failure."""
+    for a, r in zip(actions, result.get("results") or []):
+        if a.get("type") != "import":
+            continue
+        want, got = len(a["transactions"]), (r.get("added") or 0) + (r.get("updated") or 0)
+        if got < want:
+            msg = f"only {got} of {want} rows were imported"
+            r.setdefault("errors", []).append(msg)
+            result["errors"] = [*(result.get("errors") or []), msg]
+            result["ok"] = False
+    return result
+
+
 def apply_item(item: dict, gateway=None) -> dict:
     """Run a decided review item against Actual, mark it done, and supersede items it made moot."""
     gateway = gateway or actual_gateway.default()
     try:
-        actions = bridge_client.actions_for(item)
-        result = gateway.apply_actions(actions) if actions else {"ok": True, "results": [], "errors": []}
+        actions = actions_for(item)
+        result = _check_imports(actions, gateway.apply_actions(actions)) if actions \
+            else {"ok": True, "results": [], "errors": []}
         review.mark_done(item["id"], result, ok=result["ok"])
         if result["ok"]:
-            result["superseded"] = review.supersede(bridge_client.touched_ids(actions), except_id=item["id"])
+            result["superseded"] = review.supersede(touched_ids(actions), except_id=item["id"])
     except Exception as e:
         result = {"ok": False, "errors": [str(e)]}
         review.mark_done(item["id"], result, ok=False)

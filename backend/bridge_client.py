@@ -1,4 +1,5 @@
-"""Synchronous client for actual-bridge + executor for approved review items."""
+"""Synchronous HTTP transport to actual-bridge. Only actual_gateway.py should import this:
+everything else reaches Actual through the gateway."""
 from __future__ import annotations
 
 import os
@@ -11,11 +12,21 @@ import connection
 BRIDGE_URL = os.getenv("ACTUAL_BRIDGE_URL", "http://actual-bridge:3001")
 
 
-class BridgeError(RuntimeError):
-    pass
-
-
 NO_BUDGET = "No budget loaded"
+
+
+class BridgeError(RuntimeError):
+    """Actual couldn't be reached or refused the request.
+    status: the bridge's HTTP status (None when it never answered); timeout: it didn't answer in time."""
+
+    def __init__(self, message: str, status: int | None = None, timeout: bool = False):
+        super().__init__(message)
+        self.status, self.timeout = status, timeout
+
+    @property
+    def no_budget(self) -> bool:
+        """No budget is loaded and the saved connection couldn't reload one."""
+        return NO_BUDGET in str(self)
 _reload_lock = threading.Lock()
 
 
@@ -48,6 +59,9 @@ def reload_saved_budget() -> bool:
 def _request(method: str, path: str, body: dict | None, timeout: float) -> httpx.Response:
     try:
         return httpx.request(method, f"{BRIDGE_URL}{path}", json=body, timeout=timeout)
+    except httpx.TimeoutException as e:
+        raise BridgeError(f"actual-bridge did not answer within {timeout:g}s — it may be stuck reaching "
+                          "your Actual server (DNS / TLS / firewall from inside Docker?)", timeout=True) from e
     except httpx.HTTPError as e:
         raise BridgeError(f"actual-bridge unreachable: {e}") from e
 
@@ -68,7 +82,7 @@ def call(method: str, path: str, body: dict | None = None, timeout: float = 120)
     except ValueError:
         data = {"error": r.text[:300]}
     if not r.is_success:
-        raise BridgeError(data.get("error") or f"HTTP {r.status_code}")
+        raise BridgeError(data.get("error") or f"HTTP {r.status_code}", status=r.status_code)
     return data
 
 
@@ -96,12 +110,9 @@ def apply_actions(actions: list[dict]) -> dict:
                             ("keep_id", "other_id", "keep_account", "other_account", "date")}]}))
         elif t == "import":
             rows = a["transactions"]
-            r = call("POST", "/import", {"accountId": a["account"], "transactions": rows, "reimportDeleted": True,
-                                         "verified": {r["imported_id"]: "import" for r in rows}})
-            got = (r.get("added") or 0) + (r.get("updated") or 0)
-            if got < len(rows):
-                r.setdefault("errors", []).append(f"only {got} of {len(rows)} rows were imported")
-            out.append(r)
+            out.append(call("POST", "/import", {"accountId": a["account"], "transactions": rows,
+                                                "reimportDeleted": True,
+                                                "verified": {r["imported_id"]: "import" for r in rows}}))
         elif t == "adjust":
             out.append(call("POST", "/txns/add", {"accountId": a["account"], "transactions": [{
                 "date": a["date"], "amount": int(a["amount_cents"]),
@@ -114,33 +125,3 @@ def apply_actions(actions: list[dict]) -> dict:
     errors = [e for r in out for e in (r.get("errors") or [])]
     return {"ok": not errors, "results": out, "errors": errors}
 
-
-def touched_ids(actions: list[dict]) -> set[str]:
-    ids = set()
-    for a in actions:
-        ids.update(a.get("ids") or [])
-        ids.update(x for x in (a.get("keep_id"), a.get("other_id")) if x)
-    return ids
-
-
-def actions_for(item: dict) -> list[dict]:
-    """Translate an approved review item into bridge actions."""
-    kind, d, p = item["kind"], item["decision"], item["payload"]
-    if kind == "import_duplicate":
-        return [{"type": "import", "account": p["account"], "transactions": [p["incoming"]]}] if d == "import" else []
-    if kind == "existing_duplicate":
-        if d in ("delete_a", "delete_b"):
-            return [{"type": "delete", "ids": [p["a" if d == "delete_a" else "b"]["id"]]}]
-        return []
-    if kind == "transfer_pair":
-        if d != "link":
-            return []
-        a, b = p["a"], p["b"]
-        return [{"type": "link", "keep_id": a["id"], "other_id": b["id"], "keep_account": a["account"],
-                 "other_account": b["account"], "date": a["date"]}]
-    if kind == "reconcile_fix":
-        return p["actions"] if d == "apply" else []
-    if kind == "recategorize":
-        from recategorize import update_for
-        return [{"type": "categorize", "updates": [update_for(p)]}] if d == "apply" else []
-    raise ValueError(kind)

@@ -153,6 +153,15 @@ class FakeActual:
                     if r["id"] == a["other_id"]:
                         r["transfer_id"] = a["keep_id"]
                 out.append({"ok": True, "errors": []})
+            elif a["type"] == "import":
+                rows = a["transactions"]
+                out.append(self.import_rows(a["account"], rows, reimport_deleted=True,
+                                            verified={r["imported_id"]: "import" for r in rows}))
+            elif a["type"] == "adjust":
+                self._need_budget()
+                self.add(a["account"], a["date"], int(a["amount_cents"]), a.get("payee", "Reconciliation adjustment"),
+                         notes=a.get("note", "#reconcile"))
+                out.append({"ok": True, "added": 1, "errors": []})
             elif a["type"] == "categorize":
                 for u in a["updates"]:
                     for r in self.rows:
@@ -161,7 +170,8 @@ class FakeActual:
                 out.append({"ok": True, "errors": []})
             else:
                 raise ValueError(f"FakeActual can't {a['type']}")
-        return {"ok": True, "results": out, "errors": []}
+        errors = [e for r in out for e in (r.get("errors") or [])]
+        return {"ok": not errors, "results": out, "errors": errors}
 
     def create_rules(self, mappings) -> int:
         n = 0
@@ -172,3 +182,57 @@ class FakeActual:
             self.learned.append({"payee": m["payee"], "category_id": m["category_id"]})
             n += 1
         return n
+
+    # ── connection ──
+    def budgets(self, credentials: dict) -> list[dict]:
+        self.calls.append(("budgets", credentials.get("serverURL")))
+        return [{"id": "b1", "groupId": "sync-1", "name": "My Budget"}]
+
+    def load_budget(self, credentials: dict) -> dict:
+        self.calls.append(("load_budget", credentials.get("budgetId")))
+        self.loaded = True
+        return {"ok": True, "accounts": self._accounts_with_balance(), "categoryGroups": self.category_groups(),
+                "payees": copy.deepcopy(self.payees), "rules": copy.deepcopy(self.rules)}
+
+    def disconnect(self) -> None:
+        self.calls.append(("disconnect",))
+        self.loaded = False
+
+    # ── budget reads ──
+    def _accounts_with_balance(self) -> list[dict]:
+        return [{**a, "balance": sum(r["amount"] for r in self.rows if r["account"] == a["id"])}
+                for a in copy.deepcopy(self.accounts)]
+
+    def list_accounts(self) -> list[dict]:
+        self._need_budget()
+        return self._accounts_with_balance()
+
+    def category_groups(self) -> list[dict]:
+        self._need_budget()
+        groups: dict[str, dict] = {}
+        for c in self.categories:
+            g = c.get("group_name") or "General"
+            groups.setdefault(g, {"id": f"g-{g}", "name": g, "is_income": bool(c.get("is_income")),
+                                  "categories": []})["categories"].append(copy.deepcopy(c))
+        return list(groups.values())
+
+    def create_category(self, name: str, group_id: str | None = None, group_name: str | None = None) -> dict:
+        self._need_budget()
+        if not (group_id or group_name):
+            raise GatewayError("groupId or groupName required", status=400)
+        group = group_name or (group_id or "").removeprefix("g-")
+        cat = {"id": f"c{next(self._ids)}", "name": name, "group_name": group}
+        self.categories.append(cat)
+        return {"id": cat["id"], "name": name, "group_id": f"g-{group}"}
+
+    def list_payees(self) -> list[dict]:
+        self._need_budget()
+        return copy.deepcopy(self.payees)
+
+    def list_rules(self) -> list[dict]:
+        self._need_budget()
+        return copy.deepcopy(self.rules)
+
+    def budget_month(self, month: str) -> dict:
+        self._need_budget()
+        return {"budget": {"month": month, "categoryGroups": []}, "categoryGroups": self.category_groups()}

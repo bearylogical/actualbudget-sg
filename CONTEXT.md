@@ -29,3 +29,19 @@ _Avoid_: cross-account conflict
 **Legacy ID**:
 An older form of a row's imported ID, kept so a Statement still matches rows imported before the ID scheme changed.
 _Avoid_: old hash
+
+### Reaching Actual
+
+**Actual gateway**:
+The one way the backend and the scheduler reach the loaded Actual budget. When actual-bridge has restarted and forgotten the budget, the gateway reloads it from the saved connection before giving up.
+_Avoid_: bridge client, bridge call (for anything outside the gateway)
+
+**Saved connection**:
+The Actual server, password and budget last loaded from the UI, kept so the scheduler and the gateway's reload can load the budget without a person.
+_Avoid_: scheduler config
+
+### Reviewing
+
+**Review action**:
+What a decided review item asks Actual to do — delete, link, import, adjust or categorize. The review side decides the actions and checks Actual really did them (an approved import that Actual skipped fails the item); the gateway only carries them out.
+_Avoid_: bridge action
