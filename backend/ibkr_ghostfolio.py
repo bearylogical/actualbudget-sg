@@ -15,16 +15,20 @@ hands the raw JSON to /investments/ibkr/preview. This module:
 
 Nothing is written until /investments/ibkr/import is called with the previewed
 activities (Ghostfolio's own duplicate check runs again on import).
+
+Interface: preview / import_activities / clear_cash / list_activities, each taking a
+ghostfolio.Client. Errors are GhostfolioError (the request is refused → 400) or
+GhostfolioUnreachable (→ 502); the routes in main.py only translate HTTP.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
-from ghostfolio import is_cash
+from ghostfolio import Client, GhostfolioError, activity_view, is_cash
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 SYMBOL_MAP_FILE = DATA_DIR / "symbol_map.json"
@@ -192,3 +196,90 @@ def opening_lots(positions: list[dict], diffs: list[dict], account_id: str | Non
             lot["accountId"] = account_id
         lots.append(lot)
     return lots
+
+
+# ── the sync, against a Ghostfolio client ─────────────────────────────────────
+
+class SyncError(GhostfolioError):
+    """A sync request we refuse before touching Ghostfolio (→ 400)."""
+
+
+def resolve_account(gf: Client, account_id: str | None) -> dict:
+    """The Ghostfolio account to sync into: the one named, else the one that looks like IBKR."""
+    if account_id:
+        a = next((x for x in gf.accounts() if x["id"] == account_id), None)
+        if not a:
+            raise SyncError(f"Ghostfolio has no account {account_id}")
+        return a
+    a = gf.find_broker_account()
+    if not a:
+        raise SyncError("No IBKR account found in Ghostfolio — create one (platform: Interactive Brokers) "
+                        "or pass account_id")
+    return a
+
+
+def _signed(acts: list[dict]) -> list[dict]:
+    return [{"symbol": x["symbol"], "quantity": x["quantity"] * (1 if x["type"] == "BUY" else -1)} for x in acts]
+
+
+def preview(gf: Client, trades: list[dict], positions: list[dict], account_id: str | None = None,
+            today: date | None = None) -> dict:
+    """Raw IBKR connector output → what an import would do. Writes nothing.
+
+    Positions IBKR holds beyond what the new trades explain become suggested opening lots,
+    dated the day before the earliest trade (or yesterday if there are no trades)."""
+    positions = positions or []
+    a = resolve_account(gf, account_id)
+    mapped = map_trades(trades or [], positions, a["id"])
+    new, dup = already_imported(mapped["activities"], gf.orders(a["id"]))
+    check = gf.import_activities(new, dry_run=True) if new else {"activities": []}
+    current = gf.holdings(a["id"])
+    after = compare_positions(positions, current + _signed(new))
+    first = min((x["date"][:10] for x in mapped["activities"]), default=(today or date.today()).isoformat())
+    opening_date = (date.fromisoformat(first) - timedelta(days=1)).isoformat()
+    return {"account": {"id": a["id"], "name": a.get("name"), "currency": a.get("currency"),
+                        "cash_balance_to_clear": float(a.get("balance") or 0)},
+            "new": new, "already_imported": len(dup),
+            "skipped": mapped["skipped"], "unmapped": mapped["unmapped"],
+            "ghostfolio_check": [x for x in check.get("activities", []) if x.get("error")],
+            "position_diff_before": compare_positions(positions, current),
+            "position_diff_after_import": after,
+            "suggested_opening_lots": opening_lots(positions, after, a["id"], opening_date)}
+
+
+def import_activities(gf: Client, activities: list[dict], positions: list[dict] | None = None,
+                      account_id: str | None = None, keep_cash: bool = False) -> dict:
+    """Import previewed activities (preview's `new` / `suggested_opening_lots`, unchanged).
+
+    Every activity is linked to the IBKR account (activities without accountId would land in no
+    account), anything already in Ghostfolio is dropped again (safe to re-run after a partial run),
+    and afterwards that account's cash balance — only that account's — is set to 0, so Ghostfolio
+    tracks the stocks/ETFs only; the cash is tracked in Actual."""
+    if not activities:
+        raise SyncError("nothing to import")
+    bad = [x for x in activities if not re.search(r"ibkr:\S+", str(x.get("comment") or ""))]
+    if bad:
+        raise SyncError(f"{len(bad)} activities lack the ibkr:<trade id> comment — pass the preview's "
+                        "`new` / `suggested_opening_lots` unchanged")
+    a = resolve_account(gf, account_id or next((x["accountId"] for x in activities if x.get("accountId")), None))
+    linked = [{**x, "accountId": a["id"]} for x in activities]
+    new, dup = already_imported(linked, gf.orders(a["id"]))
+    res = gf.import_activities(new, dry_run=False) if new else {"activities": []}
+    cleared = [] if keep_cash else gf.clear_cash([a["id"]], dry_run=False)
+    diff = compare_positions(positions, gf.holdings(a["id"])) if positions else None
+    return {"account": {"id": a["id"], "name": a.get("name")}, "imported": len(res.get("activities", new)),
+            "already_imported": len(dup), "cash_cleared": cleared, "position_diff_after": diff}
+
+
+def clear_cash(gf: Client, account_ids: list[str] | None = None, dry_run: bool = True) -> dict:
+    """Zero cash balances (default: every account; dry run by default). Activities are untouched."""
+    return {"dry_run": dry_run, "accounts": gf.clear_cash(account_ids or None, dry_run)}
+
+
+def list_activities(gf: Client, account_id: str | None = None, symbol: str = "") -> dict:
+    """Activities in Ghostfolio as flat rows, newest first, optionally filtered by symbol substring."""
+    rows = [activity_view(o) for o in gf.orders(account_id or None)]
+    if symbol:
+        rows = [r for r in rows if symbol.upper() in str(r["symbol"] or "").upper()]
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return {"count": len(rows), "activities": rows}
