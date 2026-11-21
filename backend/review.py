@@ -384,6 +384,23 @@ def _id_kind(t: dict) -> str:
     return "manual" if not iid else ("ref" if iid.startswith("ref-") else "hash")
 
 
+_OCCURRENCE = re.compile(r"^(ref-.+?)(-\d{1,2})?$")
+
+
+def bank_ref(t: dict) -> str | None:
+    """The bank reference a row was imported under, without the occurrence suffix the
+    parser adds to a repeated id (ref-X and ref-X-1 carry the same reference)."""
+    iid = str(t.get("imported_id") or "")
+    m = _OCCURRENCE.match(iid)
+    return m.group(1) if m else None
+
+
+def distinct_refs(a: dict, b: dict) -> bool:
+    """Both rows carry a bank reference and they differ: two real transactions."""
+    ra, rb = bank_ref(a), bank_ref(b)
+    return bool(ra and rb and ra != rb)
+
+
 def drop_choice(a: dict, b: dict) -> str:
     """Which copy of a duplicate to delete: keep the one carrying a bank reference,
     then any imported copy over a hand-typed one, else the later/second copy."""
@@ -391,6 +408,9 @@ def drop_choice(a: dict, b: dict) -> str:
     rank = {"ref": 2, "hash": 1, "manual": 0}
     if rank[ka] != rank[kb]:
         return "delete_a" if rank[ka] < rank[kb] else "delete_b"
+    sa, sb = (bool((m := _OCCURRENCE.match(str(t.get("imported_id") or ""))) and m.group(2)) for t in (a, b))
+    if sa != sb:          # ref-X and ref-X-1: the suffixed copy is the repeat
+        return "delete_a" if sa else "delete_b"
     return "delete_b"
 
 
@@ -425,12 +445,15 @@ def find_existing_duplicates(txns: list[dict], max_days: int = 2) -> list[dict]:
                     continue
                 ka, kb = _id_kind(a), _id_kind(b)
                 # two different bank references = two different transactions, however similar
-                if ka == kb == "ref":
+                if distinct_refs(a, b):
                     continue
+                same_ref = ka == kb == "ref"      # one reference imported twice (ref-X, ref-X-1)
                 same_payee = _norm(a.get("payee")) and _norm(a.get("payee")) == _norm(b.get("payee"))
                 same_text = _norm(a.get("imported_payee")) and _norm(a.get("imported_payee")) == _norm(b.get("imported_payee"))
                 one_manual = (ka == "manual") != (kb == "manual")
-                if same_payee or same_text:
+                if same_ref:
+                    conf, reason = "high", "the same bank reference imported twice"
+                elif same_payee or same_text:
                     conf = "high"
                     reason = ("one was typed in by hand, one imported" if one_manual else
                               "same amount and payee within %d day(s), different import ids" % gap)

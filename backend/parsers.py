@@ -1021,6 +1021,9 @@ def _finalise(txns: list[dict], info) -> list[dict]:
       * identical rows without a bank ref (two $1.80 kopi at the same stall on the
         same day) get an occurrence suffix so each has its own stable id; the plain
         hash stays a legacy id so earlier imports still match 1:1.
+      * a row repeating a bank ref already seen with the same date and amount is the
+        bank listing it twice (UOB card exports spanning two statement cycles repeat a
+        whole block of posted rows) — it is dropped, not imported as a second copy.
     """
     if SKIP_PENDING:
         kept = [t for t in txns if not t.get("pending")]
@@ -1028,6 +1031,19 @@ def _finalise(txns: list[dict], info) -> list[dict]:
         if info.skipped_pending:
             info.evidence.append(f"{info.skipped_pending} pending (unposted) rows skipped until they post")
         txns = kept
+    first_ref: dict[str, dict] = {}
+    kept = []
+    for t in txns:
+        base = t["imported_id"]
+        if base.startswith("ref-"):
+            prev = first_ref.setdefault(base, t)
+            if prev is not t and prev["date"] == t["date"] and prev["amount"] == t["amount"]:
+                info.repeated_rows += 1
+                continue
+        kept.append(t)
+    if info.repeated_rows:
+        info.evidence.append(f"{info.repeated_rows} rows the bank listed twice (same reference) skipped")
+    txns = kept
     seen: dict[str, int] = {}
     for t in txns:
         base = t["imported_id"]

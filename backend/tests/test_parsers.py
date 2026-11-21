@@ -76,6 +76,22 @@ def test_finalise_skips_pending_and_suffixes_identical_rows():
     assert info.skipped_pending == 1
 
 
+def test_finalise_drops_rows_the_bank_listed_twice():
+    import accounts
+    from parsers import _finalise
+    rows = [
+        {"imported_id": "ref-7", "legacy_ids": ["h7"], "date": "2026-11-02", "amount": 22.48, "pending": False},
+        {"imported_id": "ref-8", "legacy_ids": [], "date": "2026-11-02", "amount": 0.09, "pending": False},
+        {"imported_id": "ref-7", "legacy_ids": ["h7"], "date": "2026-11-02", "amount": 22.48, "pending": False},
+        {"imported_id": "ref-8", "legacy_ids": [], "date": "2026-11-05", "amount": 3.00, "pending": False},
+    ]
+    info = accounts.StatementInfo(bank="UOB")
+    out = _finalise(rows, info)
+    # the exact repeat is dropped; a same-ref row on another date/amount is kept apart
+    assert [t["imported_id"] for t in out] == ["ref-7", "ref-8", "ref-8-1"]
+    assert info.repeated_rows == 1 and any("listed twice" in e for e in info.evidence)
+
+
 def test_uob_card_pending_rows_are_held_back():
     from parsers import parse_statement
     df = uob_df()
