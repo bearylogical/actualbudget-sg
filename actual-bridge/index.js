@@ -468,14 +468,18 @@ app.post('/txns/add', (req, res) => serialised(async () => {
 app.post('/txns/update', (req, res) => serialised(async () => {
   if (!requireBudget(res)) return;
   const { updates = [] } = req.body || {};
-  const result = { updated: 0, errors: [] };
+  // failed: [{ id, error }] per row, so the backend can settle each item on its own outcome
+  const result = { updated: 0, errors: [], failed: [] };
   for (const u of updates) {
     try {
       const fields = { category: u.category };
       if ('notes' in u) fields.notes = u.notes;
       await api.updateTransaction(u.id, fields);
       result.updated++;
-    } catch (e) { result.errors.push(`${u.id}: ${errMsg(e)}`); }
+    } catch (e) {
+      result.errors.push(`${u.id}: ${errMsg(e)}`);
+      result.failed.push({ id: u.id, error: errMsg(e) });
+    }
   }
   await api.sync();
   res.json({ ok: true, ...result });

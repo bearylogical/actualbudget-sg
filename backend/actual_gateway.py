@@ -100,6 +100,12 @@ class HttpGateway:
         """month "YYYY-MM" → {budget, categoryGroups}."""
         return bridge_client.call("GET", f"/budget-month/{month}", timeout=30)
 
+    def categorize(self, updates: list[dict]) -> dict[str, str]:
+        """updates: [{id, category, notes?}], written in one call (one sync).
+        → {txn id: error} for the rows that failed; the rest were updated."""
+        r = bridge_client.call("POST", "/txns/update", {"updates": updates}, timeout=300)
+        return {f["id"]: f["error"] for f in r.get("failed") or []}
+
 
 _default = HttpGateway()
 

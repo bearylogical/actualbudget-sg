@@ -45,3 +45,21 @@ _Avoid_: scheduler config
 **Review action**:
 What a decided review item asks Actual to do — delete, link, import, adjust or categorize. The review side decides the actions and checks Actual really did them (an approved import that Actual skipped fails the item); the gateway only carries them out.
 _Avoid_: bridge action
+
+### Keeping categories right
+
+**Recategorize**:
+Proposing a better category for a row already in Actual, queuing the proposal as a Category fix, and writing approved ones back — the lifecycle in `backend/recategorize.py` (scan, refresh, apply). Nothing changes in Actual until a Category fix is approved or a Learned pattern approves it.
+_Avoid_: category scan, re-categorise job
+
+**Category fix**:
+One queued Recategorize proposal: a row, the category it had when proposed, and the category proposed for it. It is a review item of kind `recategorize`.
+_Avoid_: suggestion, recat item
+
+**Fixed elsewhere**:
+A Category fix whose row was deleted or recategorised in Actual after it was queued. It is superseded — never written over — whether that's noticed on refresh or at the moment it would be applied.
+_Avoid_: stale, conflict
+
+**Learned pattern**:
+A payee → category (or other review) decision made the same way enough times (`REVIEW_LEARN_AFTER`) that new matching items approve themselves, and waiting ones are promoted on refresh.
+_Avoid_: auto-rule (that is an Actual rule)
