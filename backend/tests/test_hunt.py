@@ -94,3 +94,31 @@ def test_hunt_skips_pairs_you_already_decided(tmp_path):
     _, handlers, _ = hunt.tools(rows, [], ("2026-09-01", "2026-09-30"))
     assert handlers["loose_duplicates"]()["total"] == 0
     assert "skipped" in handlers["propose_duplicate"]("g1", "g2", "dup")
+
+
+def test_hunt_route_runs_end_to_end(monkeypatch):
+    """POST /review/hunt wires the bridge rows, account last-4s and the LLM into hunt.run."""
+    from fastapi.testclient import TestClient
+    import main
+    import bridge_client
+
+    class FakeLLM:
+        enabled, model = True, "fake"
+
+    seen = {}
+
+    def fake_run(rows, accts, window, llm, last4, instructions):
+        seen.update(rows=rows, window=window, last4=last4, instructions=instructions)
+        return {"explanation": "ok", "queued": [], "findings": [], "tool_calls": [], "scanned": len(rows),
+                "window": {"start": window[0], "end": window[1]}}
+
+    monkeypatch.setattr(main, "LLMCategorizer", FakeLLM)
+    monkeypatch.setattr(bridge_client, "txns", lambda s, e, a=None: (ROWS, [{"id": "card", "name": "CARD"}]))
+    monkeypatch.setattr(main, "_account_last4", lambda: {"card": "2583"})
+    monkeypatch.setattr(hunt, "run", fake_run)
+    r = TestClient(main.app).post("/review/hunt", json={"start": "2026-09-01", "end": "2026-09-30",
+                                                        "instructions": "Grab"})
+    assert r.status_code == 200, r.text
+    assert r.json()["scanned"] == len(ROWS) and "counts" in r.json()
+    assert seen["last4"] == {"card": "2583"} and seen["window"] == ("2026-09-01", "2026-09-30")
+    assert seen["instructions"] == "Grab"
