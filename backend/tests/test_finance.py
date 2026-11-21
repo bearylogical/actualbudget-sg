@@ -374,4 +374,4 @@ def test_finance_routes_go_through_the_snapshot(monkeypatch):
     assert c.get("/finance/trends?months=2").status_code == 200
     assert c.get("/finance/transactions?kind=nope").status_code == 400
     fa.loaded = False
-    assert c.get("/finance/week").status_code == 502
+    assert c.get("/finance/week").status_code == 400   # no budget → "connect first" (the shared gateway handler)

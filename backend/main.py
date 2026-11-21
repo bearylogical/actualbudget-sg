@@ -16,9 +16,7 @@ from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
 import connection
 import import_log
-import actual_gateway
 import bridge_client
-import actual_gateway
 import review_scan
 import statement_import as si
 from reconcile import run as recon_run
@@ -173,10 +171,6 @@ async def llm_status():
 # ── Rules audit / sync ───────────────────────────────────────────────────────
 
 
-def _rules_gateway():
-    return actual_gateway.default()
-
-
 async def _rules_call(fn, *args, **kwargs):
     """Run a Rules audit / sync call against the Actual gateway, mapping GatewayError to HTTP."""
     try:
@@ -189,7 +183,7 @@ async def _rules_call(fn, *args, **kwargs):
 
 
 def _rules_report(sample_descriptions=None, all_seed: bool = False) -> dict:
-    ctx = ActualContext.from_bridge(_rules_gateway().context())
+    ctx = ActualContext.from_bridge(gateway().context())
     return audit(ctx, sample_descriptions, load_aliases(), all_seed)
 
 
@@ -219,7 +213,7 @@ async def rules_sync(body: dict):
     """
     return await _rules_call(
         rules_sync_run,
-        _rules_gateway(),
+        gateway(),
         body.get("parts") or {},
         dry_run=body.get("dryRun", True),
         sample_descriptions=body.get("sample_descriptions"),
@@ -259,12 +253,6 @@ async def export_csv(data: dict):
 
 
 # ── Actual Budget bridge proxy ────────────────────────────────────────────────
-
-
-async def _bridge(method: str, path: str, body: dict = None, timeout: int = 30):
-    """Deprecated raw call, kept only for the routes not yet on the gateway (/rules/sync,
-    /review/recategorize/apply-many). New code: add a method to actual_gateway.HttpGateway."""
-    return await run_in_threadpool(bridge_client.call, method, path, body, timeout)
 
 
 @app.post("/actual/budgets")
@@ -589,8 +577,7 @@ def _card_account_ids() -> set[str]:
 
 
 def _snapshot() -> finance.Snapshot:
-    import actual_gateway
-    return finance.Snapshot(actual_gateway.default(), ghost=ghostfolio.summary,
+    return finance.Snapshot(gateway(), ghost=ghostfolio.summary,
                             card_ids=_card_account_ids, review_counts=review.counts)
 
 
@@ -598,8 +585,6 @@ async def _finance(fn, *args):
     """Run a Snapshot view in the threadpool: Actual unreachable → 502, bad input → 400."""
     try:
         return await run_in_threadpool(fn, *args)
-    except bridge_client.BridgeError as e:
-        raise HTTPException(502, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
