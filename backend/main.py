@@ -609,137 +609,63 @@ async def finance_brief():
 
 
 # ── Investments: IBKR → Ghostfolio (on demand, data read by Claude's IBKR connector) ──
-import re
-
 import ibkr_ghostfolio as ibgf
 
 
-def _ibkr_account(account_id: str | None) -> dict:
-    if account_id:
-        a = next((x for x in ghostfolio.accounts() if x["id"] == account_id), None)
-        if not a:
-            raise HTTPException(400, f"Ghostfolio has no account {account_id}")
-        return a
-    a = ghostfolio.find_broker_account()
-    if not a:
-        raise HTTPException(400, "No IBKR account found in Ghostfolio — create one (platform: Interactive Brokers) "
-                                 "or pass account_id")
-    return a
+def _ghostfolio() -> ghostfolio.Client:
+    """The Ghostfolio adapter the IBKR routes use; tests override it to swap in a fake transport."""
+    return ghostfolio.Client()
+
+
+@app.exception_handler(ghostfolio.GhostfolioError)
+async def _ghostfolio_error(_request, e: ghostfolio.GhostfolioError):
+    """Refused by Ghostfolio or the sync → 400; Ghostfolio down or erroring → 502."""
+    return JSONResponse({"detail": str(e)}, status_code=502 if isinstance(e, ghostfolio.GhostfolioUnreachable) else 400)
+
+
+def _dry_run(body: dict | None) -> bool:
+    return (body or {}).get("dry_run", True) is not False
 
 
 @app.post("/investments/ibkr/preview")
 async def ibkr_preview(body: dict):
     """{trades: [...], positions: [...], account_id?} — raw IBKR connector output. Writes nothing."""
-    def run():
-        a = _ibkr_account(body.get("account_id"))
-        mapped = ibgf.map_trades(body.get("trades") or [], body.get("positions") or [], a["id"])
-        new, dup = ibgf.already_imported(mapped["activities"], ghostfolio.orders(a["id"]))
-        check = ghostfolio.import_activities(new, dry_run=True) if new else {"activities": []}
-        problems = [x for x in check.get("activities", []) if x.get("error")]
-        current = ghostfolio.holdings(a["id"])
-        before = ibgf.compare_positions(body.get("positions") or [], current)
-        # what would still differ after importing `new` → candidates for opening lots
-        after = ibgf.compare_positions(body.get("positions") or [],
-                                       current + [{"symbol": x["symbol"], "quantity": x["quantity"] * (1 if x["type"] == "BUY" else -1)}
-                                                  for x in new])
-        first = min((x["date"][:10] for x in mapped["activities"]), default=_date.today().isoformat())
-        opening_date = (_date.fromisoformat(first) - _td(days=1)).isoformat()
-        return {"account": {"id": a["id"], "name": a.get("name"), "currency": a.get("currency"),
-                            "cash_balance_to_clear": float(a.get("balance") or 0)}, "new": new, "already_imported": len(dup),
-                "skipped": mapped["skipped"], "unmapped": mapped["unmapped"], "ghostfolio_check": problems,
-                "position_diff_before": before, "position_diff_after_import": after,
-                "suggested_opening_lots": ibgf.opening_lots(body.get("positions") or [], after, a["id"], opening_date)}
-    try:
-        return await run_in_threadpool(run)
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    return await run_in_threadpool(ibgf.preview, _ghostfolio(), body.get("trades") or [],
+                                   body.get("positions") or [], body.get("account_id"))
 
 
 @app.post("/investments/ibkr/import")
 async def ibkr_import(body: dict):
-    """{activities: [...from preview.new], positions?: [...], account_id?, keep_cash?} — imports into Ghostfolio.
-
-    Every activity is linked to the IBKR account (activities without accountId would land in no account),
-    anything already in Ghostfolio is dropped again (safe to re-run), and afterwards the account's cash
-    balance is set to 0 so Ghostfolio tracks the stocks/ETFs only — the cash is tracked in Actual."""
-    acts = body.get("activities") or []
-    if not acts:
-        raise HTTPException(400, "nothing to import")
-    bad = [a for a in acts if not re.search(r"ibkr:\S+", str(a.get("comment") or ""))]
-    if bad:
-        raise HTTPException(400, f"{len(bad)} activities lack the ibkr:<trade id> comment — pass the preview's "
-                                 "`new` / `suggested_opening_lots` unchanged")
-    def run():
-        a = _ibkr_account(body.get("account_id") or next((x["accountId"] for x in acts if x.get("accountId")), None))
-        linked = [{**x, "accountId": a["id"]} for x in acts]
-        new, dup = ibgf.already_imported(linked, ghostfolio.orders(a["id"]))
-        res = ghostfolio.import_activities(new, dry_run=False) if new else {"activities": []}
-        cleared = [] if body.get("keep_cash") else ghostfolio.clear_cash([a["id"]], dry_run=False)
-        diff = ibgf.compare_positions(body.get("positions") or [], ghostfolio.holdings(a["id"])) if body.get("positions") else None
-        return {"account": {"id": a["id"], "name": a.get("name")}, "imported": len(res.get("activities", new)),
-                "already_imported": len(dup), "cash_cleared": cleared, "position_diff_after": diff}
-    try:
-        return await run_in_threadpool(run)
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    """{activities: [...from preview.new], positions?: [...], account_id?, keep_cash?} — imports into
+    Ghostfolio (see ibkr_ghostfolio.import_activities)."""
+    return await run_in_threadpool(ibgf.import_activities, _ghostfolio(), body.get("activities") or [],
+                                   body.get("positions") or [], body.get("account_id"), bool(body.get("keep_cash")))
 
 
 @app.post("/investments/ghostfolio/clear-cash")
 async def ghostfolio_clear_cash(body: dict | None = None):
     """{account_ids?: [...], dry_run?: true} — zero cash balances so Ghostfolio tracks securities only.
     Default is a dry run over all accounts; activities and holdings are never touched."""
-    body = body or {}
-    try:
-        changed = await run_in_threadpool(ghostfolio.clear_cash, body.get("account_ids") or None,
-                                          body.get("dry_run", True) is not False)
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
-    return {"dry_run": body.get("dry_run", True) is not False, "accounts": changed}
+    return await run_in_threadpool(ibgf.clear_cash, _ghostfolio(), (body or {}).get("account_ids"), _dry_run(body))
 
 
 @app.get("/investments/ghostfolio/activities")
 async def ghostfolio_activities(account_id: str = "", symbol: str = ""):
     """Activities in Ghostfolio (id, date, type, symbol, quantity, unitPrice, fee, comment), newest first."""
-    try:
-        rows = [ghostfolio.activity_view(o) for o in await run_in_threadpool(ghostfolio.orders, account_id or None)]
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
-    if symbol:
-        rows = [r for r in rows if symbol.upper() in str(r["symbol"] or "").upper()]
-    rows.sort(key=lambda r: r["date"], reverse=True)
-    return {"count": len(rows), "activities": rows}
+    return await run_in_threadpool(ibgf.list_activities, _ghostfolio(), account_id, symbol)
 
 
 @app.post("/investments/ghostfolio/activities/{activity_id}/update")
 async def ghostfolio_update_activity(activity_id: str, body: dict):
     """{changes: {fee?, quantity?, unitPrice?, date?, type?, currency?, comment?, accountId?}, dry_run?: true}"""
-    try:
-        return await run_in_threadpool(ghostfolio.update_activity, activity_id, body.get("changes") or {},
-                                       body.get("dry_run", True) is not False)
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    return await run_in_threadpool(_ghostfolio().update_activity, activity_id, body.get("changes") or {},
+                                   _dry_run(body))
 
 
 @app.post("/investments/ghostfolio/activities/{activity_id}/delete")
 async def ghostfolio_delete_activity(activity_id: str, body: dict | None = None):
     """{dry_run?: true} — delete one activity (dry run by default)."""
-    try:
-        return await run_in_threadpool(ghostfolio.delete_activity, activity_id,
-                                       (body or {}).get("dry_run", True) is not False)
-    except ghostfolio.GhostfolioError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Ghostfolio unreachable: {e}")
+    return await run_in_threadpool(_ghostfolio().delete_activity, activity_id, _dry_run(body))
 
 
 @app.get("/finance/week")

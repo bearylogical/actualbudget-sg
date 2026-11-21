@@ -291,3 +291,60 @@ def delete_activity(activity_id: str, dry_run: bool = True, transport=None) -> d
     if r.status_code >= 400:
         raise GhostfolioError(f"Ghostfolio activity delete failed ({r.status_code}): {r.text[:300]}")
     return {"dry_run": False, "deleted": before}
+
+
+# ── the adapter the IBKR sync talks through ───────────────────────────────────
+
+class GhostfolioUnreachable(GhostfolioError):
+    """Ghostfolio didn't answer, or answered with an HTTP error we didn't expect (→ 502)."""
+
+
+def _reachable(fn):
+    def wrapped(self, *a, **kw):
+        try:
+            return fn(self, *a, **kw)
+        except httpx.HTTPError as e:
+            raise GhostfolioUnreachable(f"Ghostfolio unreachable: {e}") from e
+    wrapped.__name__, wrapped.__doc__ = fn.__name__, fn.__doc__
+    return wrapped
+
+
+class Client:
+    """Ghostfolio's write-side API bound to one transport. transport=None is the real network;
+    tests pass an httpx.MockTransport. Every httpx failure surfaces as GhostfolioUnreachable,
+    so callers only ever see GhostfolioError (refused → 400) or its Unreachable subclass (→ 502)."""
+
+    def __init__(self, transport: httpx.BaseTransport | None = None):
+        self.transport = transport
+
+    @_reachable
+    def accounts(self) -> list[dict]:
+        return accounts(self.transport)
+
+    @_reachable
+    def find_broker_account(self) -> dict | None:
+        return find_broker_account(transport=self.transport)
+
+    @_reachable
+    def orders(self, account_id: str | None = None) -> list[dict]:
+        return orders(account_id, self.transport)
+
+    @_reachable
+    def holdings(self, account_id: str | None = None) -> list[dict]:
+        return holdings(account_id, self.transport)
+
+    @_reachable
+    def import_activities(self, activities: list[dict], dry_run: bool = True) -> dict:
+        return import_activities(activities, dry_run, self.transport)
+
+    @_reachable
+    def clear_cash(self, account_ids: list[str] | None = None, dry_run: bool = True) -> list[dict]:
+        return clear_cash(account_ids, dry_run, self.transport)
+
+    @_reachable
+    def update_activity(self, activity_id: str, changes: dict, dry_run: bool = True) -> dict:
+        return update_activity(activity_id, changes, dry_run, self.transport)
+
+    @_reachable
+    def delete_activity(self, activity_id: str, dry_run: bool = True) -> dict:
+        return delete_activity(activity_id, dry_run, self.transport)
