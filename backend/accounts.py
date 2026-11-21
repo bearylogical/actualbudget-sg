@@ -57,6 +57,7 @@ class StatementInfo:
     balance: float | None = None     # positive = money in the account; card: amount owed
     balance_is_owed: bool = False    # card statements print what you owe
     skipped_pending: int = 0         # unposted card rows held back (see parsers._finalise)
+    repeated_rows: int = 0           # rows the export listed twice under one bank ref (see parsers._finalise)
     evidence: list[str] = field(default_factory=list)
 
     @property

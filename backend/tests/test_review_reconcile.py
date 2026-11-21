@@ -32,6 +32,16 @@ def test_existing_duplicates_ignore_distinct_bank_refs():
     assert len(d) == 1 and {d[0]["a"]["id"], d[0]["b"]["id"]} == {"m1", "m2"}
 
 
+def test_existing_duplicates_catch_one_bank_ref_imported_twice():
+    # the bank listed the row twice in one export; the parser suffixed the repeat ref-X-1
+    rows = [tx("b", "c", "2026-11-02", -2248, "Ovhcloud", "ref-741151-1", "OVHcloud Montreal CA"),
+            tx("a", "c", "2026-11-02", -2248, "Ovhcloud", "ref-741151", "OVHcloud Montreal CA")]
+    d = review.find_existing_duplicates(rows)
+    assert len(d) == 1 and d[0]["confidence"] == "high" and "same bank reference" in d[0]["reason"]
+    drop = d[0]["b"] if d[0]["suggest"] == "delete_b" else d[0]["a"]
+    assert drop["id"] == "b"                                          # the suffixed repeat goes
+
+
 def test_existing_duplicates_catch_same_merchant_in_different_export_text():
     # the xls says "SHOPEE SINGAPORE MP", the PDF says "SHOPEE SG MP SINGAPORE"; same charge, two id schemes
     rows = [tx("x", "c", "2026-09-02", -2590, "Shopee", "ref-77", "SHOPEE SINGAPORE MP"),

@@ -48,6 +48,14 @@ def test_loose_duplicates_widen_the_window_but_respect_bank_refs():
     assert not review.find_existing_duplicates(ROWS)     # …and the strict rules indeed miss the Grab pair
 
 
+def test_same_bank_ref_imported_twice_is_not_two_transactions():
+    rows = [tx("r1", "card", "2026-11-02", -2248, "Ovhcloud", "ref-741151"),
+            tx("r2", "card", "2026-11-02", -2248, "Ovhcloud", "ref-741151-1")]
+    assert review.find_existing_duplicates(rows)
+    specs, handlers, _ = hunt.tools(rows, [], ("2026-11-01", "2026-11-30"))
+    assert handlers["rule_candidates"]()["duplicates"]
+
+
 def test_orphan_transfers_surface_amount_mismatch():
     orphans = hunt.orphan_transfer_legs(ROWS)
     s1 = next(o for o in orphans if o["row"]["id"] == "s1")

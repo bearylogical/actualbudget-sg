@@ -39,7 +39,8 @@ How to work:
 - Start with overview, then rule_candidates, loose_duplicates and orphan_transfers.
 - Before calling a repeat a duplicate, check whether it is a normal pattern with search
   (same payee every month = subscription; two small same-day food/transport charges can
-  both be real). Two different bank references (src "ref" on both) are two real transactions.
+  both be real). Two different bank references (src "ref" on both) are two real transactions;
+  the same reference twice (ids ref-X and ref-X-1) is one transaction imported twice.
 - Strong duplicate clues: one copy typed in by hand and one imported; the same charge
   exported twice (xls vs PDF: "ref" vs "hash" src, slightly different text, 0-2 days apart);
   the same bank text in two accounts.
@@ -109,7 +110,7 @@ def loose_duplicate_pairs(rows: list[dict], max_days: int = 7, exclude: set[froz
                     continue
                 if a.get("imported_id") and a.get("imported_id") == b.get("imported_id") and a["account"] == b["account"]:
                     continue
-                if _src(a) == _src(b) == "ref" and a.get("imported_id") != b.get("imported_id"):
+                if review.distinct_refs(a, b):
                     continue        # two bank references = two transactions
                 cross = a["account"] != b["account"]
                 if cross and (gap > 2 or not (review._similar_text(a, b) or
@@ -233,7 +234,7 @@ def tools(rows: list[dict], accounts: list[dict], window: tuple[str, str],
             return {"error": "amounts differ — not a duplicate; use flag if it needs a look"}
         if not (_unlinked(a) and _unlinked(b)):
             return {"error": "one of these is a linked transfer or a split line; flag it instead"}
-        if _src(a) == _src(b) == "ref" and a.get("imported_id") != b.get("imported_id"):
+        if review.distinct_refs(a, b):
             return {"error": "two different bank references are two real transactions"}
         cross = a["account"] != b["account"]
         payload = {"a": review._slim(a), "b": review._slim(b), "account": a["account"],
