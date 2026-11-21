@@ -109,6 +109,12 @@ class HttpGateway:
         → {categories, merged, rules, deleted, errors}."""
         return bridge_client.call("POST", "/rules/apply", plan, timeout=300)
 
+    def finance_summary(self, months: int) -> dict:
+        """Open accounts with balances, the last `months` budget months (income, spent, budgeted,
+        per-category budgeted/spent/balance — Actual's budget engine, only reachable from the bridge),
+        this month's uncategorised on-budget rows, and the bridge's today. → {accounts, months, uncategorised, today}"""
+        return bridge_client.call("GET", f"/finance/summary?months={int(months)}")
+
 
 _default = HttpGateway()
 

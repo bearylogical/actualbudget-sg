@@ -267,3 +267,42 @@ class FakeActual:
         return {"ok": True, "categories": len(plan.get("createCategories") or []),
                 "merged": len(plan.get("mergePayees") or []), "rules": len(plan.get("createRules") or []),
                 "deleted": len(plan.get("deleteRules") or []), "errors": []}
+
+    # ── finance_summary: a plain stand-in for Actual's budget engine (no carryover) ──
+    today: str | None = None                    # the bridge's "today"; None → date.today()
+    budgeted: dict | None = None                # {(month "YYYY-MM", category_id): cents}
+
+    def finance_summary(self, months: int) -> dict:
+        from datetime import date
+        self._need_budget()
+        today = self.today or date.today().isoformat()
+        y, m = int(today[:4]), int(today[5:7])
+        keys = []
+        for _ in range(months):
+            keys.insert(0, f"{y:04d}-{m:02d}")
+            y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+        open_ids = {a["id"] for a in self.accounts if not a.get("closed")}
+        onbudget = {a["id"] for a in self.accounts if not a.get("closed") and not a.get("offbudget")}
+        flows = [r for r in self.rows if r["account"] in onbudget and not r["is_parent"]
+                 and not r["transfer_id"] and not r["starting_balance_flag"]]
+        out = []
+        for key in keys:
+            cats = []
+            for c in self.categories:
+                spent = sum(r["amount"] for r in flows if r["date"][:7] == key and r["category"] == c["id"])
+                b = (self.budgeted or {}).get((key, c["id"]), 0)
+                cats.append({"id": c["id"], "name": c["name"], "group": c.get("group_name") or "",
+                             "is_income": bool(c.get("is_income")), "budgeted": b,
+                             "spent": 0 if c.get("is_income") else spent,
+                             "received": spent if c.get("is_income") else 0,
+                             "balance": 0 if c.get("is_income") else b + spent})
+            out.append({"month": key, "income": sum(c["received"] for c in cats),
+                        "spent": sum(c["spent"] for c in cats), "budgeted": sum(c["budgeted"] for c in cats),
+                        "toBudget": 0, "categories": cats})
+        unc = [r for r in flows if r["date"][:7] == today[:7] and r["date"] <= today and not r["category"]]
+        return {"accounts": [{"id": a["id"], "name": a["name"], "offbudget": bool(a.get("offbudget")),
+                              "balance": sum(r["amount"] for r in self.rows
+                                             if r["account"] == a["id"] and not r["is_child"])}
+                             for a in self.accounts if a["id"] in open_ids],
+                "months": out, "uncategorised": {"count": len(unc), "amount": sum(r["amount"] for r in unc)},
+                "today": today}
