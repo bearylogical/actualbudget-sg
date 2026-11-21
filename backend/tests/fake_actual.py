@@ -1,15 +1,54 @@
 """In-memory Actual: the test adapter for the Actual gateway (actual_gateway.py).
 
-Holds accounts, categories, payees, rules and transactions. Duplicate classification on import is a
-plain port of actual-bridge/dedup.js (id match, then same date + amount against imported rows inside the
-statement's range) — the real one is covered by actual-bridge/test/dedup.test.js.
+Holds accounts, categories, payees, rules and transactions. Imports go through money.to_actual like the
+real gateway, and duplicate classification (`classify`) is a port of actual-bridge/dedup.js. Both run
+the same golden cases, actual-bridge/test/fixtures/classify.json (test_classify_golden.py and
+dedup.test.js), so the port cannot drift.
 """
 from __future__ import annotations
 
 import copy
 import itertools
 
+import money
 from actual_gateway import GatewayError
+
+
+def classify(incoming: list[dict], existing: list[dict]) -> tuple[list, list, list]:
+    """dedup.js classify, line for line. incoming: Actual rows (money.to_actual); existing: rows in
+    Actual. → (clearlyNew, clearlyDup, needsVerify) — needsVerify rows carry `reason`."""
+    by_id: dict[str, list] = {}
+    for e in existing:
+        if e.get("imported_id"):
+            by_id.setdefault(e["imported_id"], []).append(e)
+    claimed, new, dup, verify, unmatched = set(), [], [], [], []
+    for t in incoming:
+        legacy = t.get("legacy_ids") if isinstance(t.get("legacy_ids"), list) else []
+        hit = None
+        for i in [t.get("imported_id"), *legacy]:
+            if not i:
+                continue
+            hit = next((e for e in by_id.get(i, []) if e["id"] not in claimed), None)
+            if hit:
+                break
+        if hit:
+            claimed.add(hit["id"])
+            dup.append(t)
+        else:
+            unmatched.append(t)
+    dates = sorted(t["date"] for t in incoming if t.get("date"))
+    lo, hi = (dates[0], dates[-1]) if dates else (None, None)
+    for t in unmatched:
+        twin = next((e for e in existing if e.get("imported_id") and e["id"] not in claimed
+                     and e["date"] == t.get("date") and lo is not None and lo <= e["date"] <= hi
+                     and e["amount"] == t["amount"]), None)
+        if twin:
+            claimed.add(twin["id"])
+            verify.append({**t, "reason": "same date and amount already imported "
+                                          f"(id {str(twin['imported_id'])[:24]})"})
+        else:
+            new.append(t)
+    return new, dup, verify
 
 
 class FakeActual:
@@ -74,63 +113,32 @@ class FakeActual:
         return rows, [{"id": a["id"], "name": a["name"], "offbudget": bool(a.get("offbudget")),
                        "closed": bool(a.get("closed"))} for a in self.accounts]
 
-    @staticmethod
-    def _cents(t: dict) -> int:
-        c = round(float(t["amount"]) * 100)
-        return c if t.get("is_credit") else -c
-
-    def _classify(self, account_id: str, incoming: list[dict]):
-        existing = [r for r in self.rows if r["account"] == account_id]
-        by_id: dict[str, list] = {}
-        for e in existing:
-            if e["imported_id"]:
-                by_id.setdefault(e["imported_id"], []).append(e)
-        claimed, new, dup, verify, unmatched = set(), [], [], [], []
-        for t in incoming:
-            hit = None
-            for i in [t.get("imported_id"), *(t.get("legacy_ids") or [])]:
-                hit = next((e for e in by_id.get(i, []) if e["id"] not in claimed), None) if i else None
-                if hit:
-                    break
-            if hit:
-                claimed.add(hit["id"])
-                dup.append(t)
-            else:
-                unmatched.append(t)
-        dates = sorted(t["date"] for t in incoming)
-        for t in unmatched:
-            twin = next((e for e in existing if e["imported_id"] and e["id"] not in claimed
-                         and e["date"] == t["date"] and dates[0] <= e["date"] <= dates[-1]
-                         and e["amount"] == self._cents(t)), None)
-            if twin:
-                claimed.add(twin["id"])
-                verify.append({**t, "reason": f"same date and amount already imported (id {twin['imported_id']})"})
-            else:
-                new.append(t)
-        return new, dup, verify
-
     def import_rows(self, account_id, rows, *, dry_run=False, verified=None, reimport_deleted=None) -> dict:
         self._need_budget()
         self.calls.append(("import", account_id, dry_run, len(rows)))
-        new, dup, verify = self._classify(account_id, rows)
+        sent = [money.to_actual(t) for t in rows]
+        new, dup, verify = classify(sent, [r for r in self.rows if r["account"] == account_id])
         if dry_run:
-            return {"ok": True, "dryRun": True, "added": len(new), "skipped": len(dup), "toVerify": verify,
-                    "updated": 0, "errors": []}
+            return money.restate_import(rows, {"ok": True, "dryRun": True, "added": len(new), "skipped": len(dup),
+                                               "toVerify": verify, "updated": 0, "errors": []})
         verified = verified or {}
         gone = self.deleted_ids.setdefault(account_id, set())
         added = []
-        for t in new + [v for v in verify if verified.get(v["imported_id"]) == "import"]:
-            if t["imported_id"] in gone and not reimport_deleted:
+        for t in new + [v for v in verify if verified.get(v.get("imported_id")) == "import"]:
+            if t.get("imported_id") in gone and not reimport_deleted:
                 continue
-            gone.discard(t["imported_id"])
-            r = self.add(account_id, t["date"], self._cents(t), t.get("payee") or t["description"],
-                         t["imported_id"], category=t.get("category_id"), notes=t.get("notes") or None)
+            gone.discard(t.get("imported_id"))
+            r = self.add(account_id, t["date"], t["amount"], t["payee_name"] or t["imported_payee"],
+                         t.get("imported_id"), category=t.get("category"), notes=t["notes"] or None,
+                         imported_payee=t["imported_payee"] or None)
             added.append(r["id"])
-        unreviewed = [v for v in verify if verified.get(v["imported_id"]) != "import"]
-        return {"ok": True, "dryRun": False, "added": len(added), "updated": 0, "addedIds": added,
-                "skipped": len(dup) + len(unreviewed), "errors": [],
-                "unreviewed": [{"imported_id": v["imported_id"], "date": v["date"], "description": v["description"],
-                                "amount": v["amount"], "reason": v["reason"]} for v in unreviewed]}
+        unreviewed = [v for v in verify if verified.get(v.get("imported_id")) != "import"]
+        return money.restate_import(rows, {
+            "ok": True, "dryRun": False, "added": len(added), "updated": 0, "addedIds": added,
+            "skipped": len(dup) + len(unreviewed), "errors": [],
+            "unreviewed": [{"imported_id": v.get("imported_id"), "date": v["date"],
+                            "imported_payee": v["imported_payee"], "amount": v["amount"], "reason": v["reason"]}
+                           for v in unreviewed]})
 
     def delete(self, ids) -> dict:
         self._need_budget()

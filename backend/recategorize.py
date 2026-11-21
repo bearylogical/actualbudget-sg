@@ -25,6 +25,7 @@ from datetime import date, timedelta
 
 import actual_gateway
 import history
+import money
 import review
 from actual_rules import ActualContext
 from pipeline import enrich
@@ -38,8 +39,8 @@ TAG_REVIEW = re.compile(r"\s*#review\b")
 def _to_parsed(t: dict) -> dict:
     """Actual row → the shape enrich() expects from a statement parser."""
     text = t.get("imported_payee") or t.get("payee") or ""
-    return {"description": text, "match_text": text, "amount": abs(t["amount"]) / 100,
-            "is_credit": t["amount"] > 0, "date": t["date"]}
+    amount, is_credit = money.statement_amount(t["amount"])
+    return {"description": text, "match_text": text, "amount": amount, "is_credit": is_credit, "date": t["date"]}
 
 
 def candidates(rows: list[dict]) -> list[dict]:
