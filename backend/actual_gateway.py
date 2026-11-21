@@ -58,6 +58,12 @@ class HttpGateway:
         body = {"mappings": [{"description": m["payee"], "categoryId": m["category_id"]} for m in mappings]}
         return int(bridge_client.call("POST", "/rules", body, timeout=60).get("created") or 0)
 
+    def categorize(self, updates: list[dict]) -> dict[str, str]:
+        """updates: [{id, category, notes?}], written in one call (one sync).
+        → {txn id: error} for the rows that failed; the rest were updated."""
+        r = bridge_client.call("POST", "/txns/update", {"updates": updates}, timeout=300)
+        return {f["id"]: f["error"] for f in r.get("failed") or []}
+
 
 _default = HttpGateway()
 

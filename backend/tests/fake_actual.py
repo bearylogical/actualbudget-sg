@@ -23,6 +23,7 @@ class FakeActual:
         self.deleted_ids: dict[str, set] = {}   # account → imported_ids deleted (Actual remembers these)
         self.loaded = loaded
         self.calls: list[tuple] = []
+        self.fail_updates: dict[str, str] = {}  # txn id → error categorize() reports for it
         self._ids = itertools.count(1)
 
     # ── setup helpers ──
@@ -172,3 +173,17 @@ class FakeActual:
             self.learned.append({"payee": m["payee"], "category_id": m["category_id"]})
             n += 1
         return n
+
+    def categorize(self, updates) -> dict[str, str]:
+        self._need_budget()
+        self.calls.append(("categorize", [u["id"] for u in updates]))
+        failed = {}
+        for u in updates:
+            r = next((r for r in self.rows if r["id"] == u["id"]), None)
+            if u["id"] in self.fail_updates or r is None:
+                failed[u["id"]] = self.fail_updates.get(u["id"], "transaction not found")
+                continue
+            r["category"] = u["category"]
+            if "notes" in u:
+                r["notes"] = u["notes"]
+        return failed
