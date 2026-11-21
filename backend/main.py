@@ -386,6 +386,7 @@ from datetime import date as _date, timedelta as _td
 
 _apply = review_scan.apply_item
 scan_and_queue = review_scan.scan_and_queue
+_account_last4 = review_scan.account_last4   # bound here: the review_scan route below shadows the module
 
 
 def recategorize_scan(start: str, end: str, mode: str = "uncategorised", use_llm: bool = True,
