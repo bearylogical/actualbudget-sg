@@ -58,6 +58,11 @@ class HttpGateway:
         body = {"mappings": [{"description": m["payee"], "categoryId": m["category_id"]} for m in mappings]}
         return int(bridge_client.call("POST", "/rules", body, timeout=60).get("created") or 0)
 
+    def apply_rules(self, plan: dict) -> dict:
+        """Rules sync writes. plan: {createCategories, mergePayees, createRules, deleteRules}
+        → {categories, merged, rules, deleted, errors}."""
+        return bridge_client.call("POST", "/rules/apply", plan, timeout=300)
+
 
 _default = HttpGateway()
 

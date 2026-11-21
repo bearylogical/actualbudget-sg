@@ -172,3 +172,11 @@ class FakeActual:
             self.learned.append({"payee": m["payee"], "category_id": m["category_id"]})
             n += 1
         return n
+
+    def apply_rules(self, plan: dict) -> dict:
+        """Rules sync writes — recorded in self.calls (the bridge does the real work)."""
+        self._need_budget()
+        self.calls.append(("apply_rules", plan))
+        return {"ok": True, "categories": len(plan.get("createCategories") or []),
+                "merged": len(plan.get("mergePayees") or []), "rules": len(plan.get("createRules") or []),
+                "deleted": len(plan.get("deleteRules") or []), "errors": []}

@@ -11,7 +11,8 @@ import accounts as acct
 from actual_rules import ActualContext
 import history
 from llm import LLMCategorizer
-from rules_audit import audit, to_markdown
+from rules_audit import audit, to_markdown, sync as rules_sync_run
+import actual_gateway
 from taxonomy import TAXONOMY, CATEGORIES, load_aliases, save_aliases
 import health
 import connection
@@ -164,20 +165,38 @@ async def llm_status():
 # ── Rules audit / sync ───────────────────────────────────────────────────────
 
 
+def _rules_gateway():
+    return actual_gateway.default()
+
+
+async def _rules_call(fn, *args, **kwargs):
+    """Run a Rules audit / sync call against the Actual gateway, mapping GatewayError to HTTP."""
+    try:
+        return await run_in_threadpool(fn, *args, **kwargs)
+    except actual_gateway.GatewayError as e:
+        msg = str(e)
+        if msg == bridge_client.NO_BUDGET:
+            raise HTTPException(400, "No Actual budget loaded — connect and load a budget first")
+        raise HTTPException(502, msg)
+
+
+def _rules_report(sample_descriptions=None, all_seed: bool = False) -> dict:
+    ctx = ActualContext.from_bridge(_rules_gateway().context())
+    return audit(ctx, sample_descriptions, load_aliases(), all_seed)
+
+
 @app.post("/rules/audit")
 async def rules_audit(body: dict | None = None):
     body = body or {}
-    ctx = await require_context()
-    report = audit(
-        ctx, body.get("sample_descriptions"), load_aliases(), bool(body.get("all_seed"))
+    report = await _rules_call(
+        _rules_report, body.get("sample_descriptions"), bool(body.get("all_seed"))
     )
     return {"report": report, "markdown": to_markdown(report)}
 
 
 @app.get("/rules/audit.md", response_class=PlainTextResponse)
 async def rules_audit_md():
-    ctx = await require_context()
-    return to_markdown(audit(ctx, None, load_aliases()))
+    return to_markdown(await _rules_call(_rules_report))
 
 
 @app.post("/rules/sync")
@@ -188,63 +207,16 @@ async def rules_sync(body: dict):
       parts: {aliases, categories, merge_payees, rules, duplicates, broken}  (bools),
       sample_descriptions: [...], all_seed: bool
     }
+    → rules_audit.sync: {dryRun, counts, plan, result?, summary_after?}
     """
-    dry = body.get("dryRun", True)
-    parts = body.get("parts") or {}
-    ctx = await require_context()
-    report = audit(
-        ctx, body.get("sample_descriptions"), load_aliases(), bool(body.get("all_seed"))
+    return await _rules_call(
+        rules_sync_run,
+        _rules_gateway(),
+        body.get("parts") or {},
+        dry_run=body.get("dryRun", True),
+        sample_descriptions=body.get("sample_descriptions"),
+        all_seed=bool(body.get("all_seed")),
     )
-    plan = report["plan"]
-    selected = {
-        "aliases": plan["aliases"] if parts.get("aliases") else {},
-        "createCategories": plan["create_categories"]
-        if parts.get("categories")
-        else [],
-        "mergePayees": plan["merge_payees"] if parts.get("merge_payees") else [],
-        "createRules": plan["create_rules"] if parts.get("rules") else [],
-        "deleteRules": (plan["delete_rules"] if parts.get("duplicates") else [])
-        + (plan["delete_broken_rules"] if parts.get("broken") else []),
-    }
-    if not parts.get("categories"):
-        # rules that need a not-yet-created category can't be applied
-        selected["createRules"] = [
-            r
-            for r in selected["createRules"]
-            if not any(
-                isinstance(a.get("value"), dict) and "$category" in a["value"]
-                for a in r["actions"]
-            )
-        ]
-    counts = {k: len(v) for k, v in selected.items()}
-    if dry:
-        return {"dryRun": True, "counts": counts, "plan": selected}
-
-    if selected["aliases"]:
-        save_aliases({**load_aliases(), **selected["aliases"]})
-    result = {"ok": True}
-    if any(
-        selected[k]
-        for k in ("createCategories", "mergePayees", "createRules", "deleteRules")
-    ):
-        body_out = {
-            k: selected[k]
-            for k in ("createCategories", "mergePayees", "createRules", "deleteRules")
-        }
-        result = await _bridge("POST", "/rules/apply", body_out, timeout=180)
-    after = await require_context()
-    after_report = audit(
-        after,
-        body.get("sample_descriptions"),
-        load_aliases(),
-        bool(body.get("all_seed")),
-    )
-    return {
-        "dryRun": False,
-        "counts": counts,
-        "result": result,
-        "summary_after": after_report["summary"],
-    }
 
 
 @app.post("/export/csv")

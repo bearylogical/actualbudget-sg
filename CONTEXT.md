@@ -29,3 +29,13 @@ _Avoid_: cross-account conflict
 **Legacy ID**:
 An older form of a row's imported ID, kept so a Statement still matches rows imported before the ID scheme changed.
 _Avoid_: old hash
+
+### Rules
+
+**Rules audit**:
+A read-only check of the loaded budget's rules, payees and categories against this app's seed merchants and taxonomy. It reports findings (broken, duplicate and conflicting rules, raw payees, missing categories) and builds a plan of fixes.
+_Avoid_: rules check, lint
+
+**Rules sync**:
+Applying chosen parts of a Rules audit plan — aliases, categories, payee merges, new rules, duplicate or broken rule deletions. A rule that needs a category the sync isn't creating is left out. Dry run by default; aliases are saved locally, the rest goes to Actual. The web UI and `rules_cli.py` both go through `rules_audit.sync`.
+_Avoid_: rules apply, rules push
