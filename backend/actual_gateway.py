@@ -104,6 +104,11 @@ class HttpGateway:
         r = bridge_client.call("POST", "/txns/update", {"updates": updates}, timeout=300)
         return {f["id"]: f["error"] for f in r.get("failed") or []}
 
+    def apply_rules(self, plan: dict) -> dict:
+        """Rules sync writes. plan: {createCategories, mergePayees, createRules, deleteRules}
+        → {categories, merged, rules, deleted, errors}."""
+        return bridge_client.call("POST", "/rules/apply", plan, timeout=300)
+
 
 _default = HttpGateway()
 

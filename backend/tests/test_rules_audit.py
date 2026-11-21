@@ -60,3 +60,88 @@ def test_main_audit_is_the_rules_audit_function():
     import main
     import rules_audit
     assert main.audit is rules_audit.audit
+
+
+# ── Rules sync (rules_audit.sync) against FakeActual ─────────────────────────
+
+import pytest  # noqa: E402
+
+import actual_gateway  # noqa: E402
+import rules_audit  # noqa: E402
+from fake_actual import FakeActual  # noqa: E402
+from taxonomy import load_aliases  # noqa: E402
+
+
+def _fake():
+    gw = FakeActual(categories=[dict(c) for c in CATS])
+    gw.payees = [dict(p) for p in PAYEES] + [{"id": "p-nf", "name": "NETFLIX.COM"}]
+    gw.rules = [rule("r1", "p-ss", "c-shop"), rule("r2", "p-ss", "c-shop")]   # r2 duplicate
+    return gw
+
+
+def _applied(gw):
+    return [c[1] for c in gw.calls if c[0] == "apply_rules"]
+
+
+ALL = {p: True for p in rules_audit.PARTS}
+
+
+def test_sync_dry_run_creates_nothing():
+    gw = _fake()
+    out = rules_audit.sync(gw, ALL, dry_run=True)
+    assert out["dryRun"] is True and "result" not in out
+    assert out["counts"]["createRules"] > 0 and out["counts"]["deleteRules"] == 1
+    assert _applied(gw) == [] and load_aliases() == {}
+
+
+def test_sync_skips_rule_that_needs_an_unselected_category():
+    gw = _fake()
+    with_cats = rules_audit.sync(gw, {"rules": True, "categories": True})["plan"]["createRules"]
+    needs_cat = [r for r in with_cats if rules_audit._needs_new_category(r)]
+    assert any("Netflix" in r["why"] for r in needs_cat)          # Subscriptions isn't in Actual yet
+    out = rules_audit.sync(gw, {"rules": True}, dry_run=False)
+    sent = _applied(gw)[0]["createRules"]
+    assert sent and not any(rules_audit._needs_new_category(r) for r in sent)
+    assert len(sent) == len(with_cats) - len(needs_cat)
+    assert out["result"]["rules"] == len(sent) and "summary_after" in out
+
+
+def test_sync_only_aliases_saves_aliases_and_applies_nothing():
+    gw = FakeActual(categories=[{"id": "c-x", "name": "Subscription"}])
+    plan = rules_audit.audit(ActualContext(gw.categories, [], []))["plan"]
+    assert plan["aliases"] == {"Subscriptions": "Subscription"}
+    out = rules_audit.sync(gw, {"aliases": True}, dry_run=False)
+    assert _applied(gw) == [] and out["result"] == {"ok": True}
+    assert load_aliases() == {**plan["aliases"]}
+    assert out["counts"]["aliases"] == len(plan["aliases"]) and out["counts"]["createRules"] == 0
+
+
+@pytest.mark.parametrize("flags,parts", [
+    (["--all"], {p: p != "broken" for p in rules_audit.PARTS}),
+    (["--rules", "--merge-payees", "--broken"], {"rules": True, "merge_payees": True, "broken": True}),
+    (["--aliases"], {"aliases": True}),
+])
+def test_cli_and_route_produce_the_same_plan(monkeypatch, capsys, flags, parts):
+    from fastapi.testclient import TestClient
+    import main
+    import rules_cli
+
+    gw = _fake()
+    monkeypatch.setattr(actual_gateway, "_default", gw)
+    seen = []
+    real_sync = rules_audit.sync
+    monkeypatch.setattr(rules_cli, "sync", lambda *a, **k: seen.append(real_sync(*a, **k)) or seen[-1])
+
+    rules_cli.main(["sync", *flags])
+    assert "Dry run" in capsys.readouterr().out
+    r = TestClient(main.app).post("/rules/sync", json={"dryRun": True, "parts": parts})
+    assert r.status_code == 200
+    assert r.json()["plan"] == seen[0]["plan"] and r.json()["counts"] == seen[0]["counts"]
+    assert _applied(gw) == []
+
+
+def test_route_without_budget_is_400(monkeypatch):
+    from fastapi.testclient import TestClient
+    import main
+    monkeypatch.setattr(actual_gateway, "_default", FakeActual(loaded=False))
+    assert TestClient(main.app).post("/rules/sync", json={}).status_code == 400

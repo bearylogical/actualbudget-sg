@@ -259,3 +259,11 @@ class FakeActual:
             if "notes" in u:
                 r["notes"] = u["notes"]
         return failed
+
+    def apply_rules(self, plan: dict) -> dict:
+        """Rules sync writes — recorded in self.calls (the bridge does the real work)."""
+        self._need_budget()
+        self.calls.append(("apply_rules", plan))
+        return {"ok": True, "categories": len(plan.get("createCategories") or []),
+                "merged": len(plan.get("mergePayees") or []), "rules": len(plan.get("createRules") or []),
+                "deleted": len(plan.get("deleteRules") or []), "errors": []}
